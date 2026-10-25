@@ -1,3 +1,4 @@
+
 require("dotenv").config();
 
 const {
@@ -23,9 +24,14 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 
+// ==================================================
+// CONFIGURATION
+// ==================================================
+
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
+
 const DATA_DIR = process.env.DATA_DIR || "/data";
 const DATA_FILE = path.join(DATA_DIR, "ppg-data.json");
 
@@ -40,16 +46,24 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
+// ==================================================
+// DATABASE
+// ==================================================
+
 function readData() {
   try {
     const parsed = JSON.parse(
       fs.readFileSync(DATA_FILE, "utf8")
     );
+
     return parsed && typeof parsed === "object"
       ? parsed
       : { events: {} };
   } catch (error) {
-    if (error.code === "ENOENT") return { events: {} };
+    if (error.code === "ENOENT") {
+      return { events: {} };
+    }
+
     throw new Error(
       `Could not read ${DATA_FILE}: ${error.message}`
     );
@@ -60,6 +74,28 @@ let db = readData();
 
 if (!db.events || typeof db.events !== "object") {
   db = { events: {} };
+}
+
+// Upgrade older saved entries without deleting existing records.
+for (const event of Object.values(db.events)) {
+  event.waves ||= {};
+
+  for (const wave of Object.values(event.waves)) {
+    wave.attendees ||= {};
+    wave.waitlist ||= [];
+
+    for (const entry of Object.values(wave.attendees)) {
+      entry.gameTag ||= "";
+      entry.friendTag ||= "";
+      entry.friendIgn ||= "";
+    }
+
+    for (const entry of wave.waitlist) {
+      entry.gameTag ||= "";
+      entry.friendTag ||= "";
+      entry.friendIgn ||= "";
+    }
+  }
 }
 
 function saveData() {
@@ -73,6 +109,8 @@ function saveData() {
 
   fs.renameSync(temp, DATA_FILE);
 }
+
+saveData();
 
 const makeId = () => crypto.randomBytes(4).toString("hex");
 
@@ -92,6 +130,10 @@ function adminOnly(command) {
   );
 }
 
+// ==================================================
+// SLASH COMMANDS
+// ==================================================
+
 const commands = [
   adminOnly(
     new SlashCommandBuilder()
@@ -102,7 +144,7 @@ const commands = [
   adminOnly(
     new SlashCommandBuilder()
       .setName("ppg-create")
-      .setDescription("Create a PPG event and its first wave.")
+      .setDescription("Create an event and its first wave.")
       .addStringOption(o =>
         o.setName("name")
           .setDescription("Event name")
@@ -127,7 +169,7 @@ const commands = [
           .setRequired(true))
       .addStringOption(o =>
         o.setName("date")
-          .setDescription("Optional date/time")
+          .setDescription("Optional date and time")
           .setRequired(false)
           .setMaxLength(80))
   ),
@@ -150,7 +192,7 @@ const commands = [
   adminOnly(
     new SlashCommandBuilder()
       .setName("ppg-edit")
-      .setDescription("Edit an event's name, date, or host team.")
+      .setDescription("Edit an event's details.")
       .addStringOption(o =>
         o.setName("event_id")
           .setDescription("Event ID")
@@ -162,7 +204,7 @@ const commands = [
           .setMaxLength(80))
       .addStringOption(o =>
         o.setName("date")
-          .setDescription("New date/time; use - to clear")
+          .setDescription("New date/time; enter - to clear")
           .setRequired(false)
           .setMaxLength(80))
       .addUserOption(o =>
@@ -215,7 +257,7 @@ const commands = [
           .setRequired(true))
       .addStringOption(o =>
         o.setName("confirm")
-          .setDescription("Type DELETE to confirm")
+          .setDescription("Select DELETE to confirm")
           .setRequired(true)
           .addChoices({ name: "DELETE", value: "DELETE" }))
   ),
@@ -242,8 +284,18 @@ const commands = [
           .setRequired(true)
           .setMaxLength(50))
       .addStringOption(o =>
+        o.setName("gametag")
+          .setDescription("Member's in-game tag")
+          .setRequired(true)
+          .setMaxLength(50))
+      .addStringOption(o =>
         o.setName("friend_ign")
-          .setDescription("Optional friend's in-game name")
+          .setDescription("Optional friend's IGN")
+          .setRequired(false)
+          .setMaxLength(50))
+      .addStringOption(o =>
+        o.setName("friend_tag")
+          .setDescription("Optional friend's in-game tag")
           .setRequired(false)
           .setMaxLength(50))
   ),
@@ -272,7 +324,7 @@ const commands = [
     adminOnly(
       new SlashCommandBuilder()
         .setName(`ppg-${action}`)
-        .setDescription(`Manage or view ${action}.`)
+        .setDescription(`View or manage ${action}.`)
         .addStringOption(o =>
           o.setName("event_id")
             .setDescription("Event ID")
@@ -293,13 +345,22 @@ const commands = [
   adminOnly(
     new SlashCommandBuilder()
       .setName("ppg-stats")
-      .setDescription("Show overall PPG signup statistics.")
+      .setDescription("Show overall signup statistics.")
   )
 ].map(command => command.toJSON());
+
+// ==================================================
+// DISCORD CLIENT
+// ==================================================
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
+
+// ==================================================
+// EVENT AND WAVE HELPERS
+// ==================================================
+
 function getEvent(eventId) {
   return db.events[eventId];
 }
@@ -336,109 +397,20 @@ function csvCell(value) {
   return `"${String(value ?? "").replace(/"/g, '""')}"`;
 }
 
-function panelPayload(eventId, waveId) {
-  const event = getEvent(eventId);
-  const wave = getWave(eventId, waveId);
-  const seats = totalSeats(wave);
-  const attendees = Object.values(wave.attendees);
-
-  const embed = new EmbedBuilder()
-    .setColor(wave.open ? 0x238636 : 0x8b2635)
-    .setTitle(`🎉 ${event.name} — ${wave.name}`)
-    .setDescription(
-      `**Type:** ${event.type}\n` +
-      (event.dateText ? `**When:** ${event.dateText}\n` : "") +
-      `**Host:** <@${event.hostId}>\n` +
-      `**Co-hosts:** <@${event.cohost1Id}> and <@${event.cohost2Id}>\n\n` +
-      `**Attendee places:** ${seats}/${CAPACITY}\n` +
-      `**Waiting list:** ${wave.waitlist.length} signup(s)\n` +
-      `**Signups:** ${wave.open ? "🟢 OPEN" : "🔴 CLOSED"}\n\n` +
-      "Press **Sign Up** and enter your IGN. You can optionally add one friend; each person uses one attendee place."
-    )
-    .setFooter({
-      text: `Event ID: ${eventId} • Wave ID: ${waveId}`
-    });
-
-  if (attendees.length) {
-    const lines = attendees.map((a, i) =>
-      `**${i + 1}.** <@${a.userId}> — ${a.ign}` +
-      (a.friendIgn ? ` (+1: ${a.friendIgn})` : "")
-    );
-
-    embed.addFields({
-      name: "📋 Confirmed attendees",
-      value: lines.join("\n").slice(0, 1024)
-    });
-  }
-
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`ppg:signup:${eventId}:${waveId}`)
-      .setLabel("Sign Up")
-      .setEmoji("📝")
-      .setStyle(ButtonStyle.Success)
-      .setDisabled(!wave.open),
-
-    new ButtonBuilder()
-      .setCustomId(`ppg:cancel:${eventId}:${waveId}`)
-      .setLabel("Cancel Signup")
-      .setEmoji("❌")
-      .setStyle(ButtonStyle.Danger)
-      .setDisabled(!wave.open)
-  );
-
-  return { embeds: [embed], components: [row] };
-}
-
-async function refreshPanel(eventId, waveId) {
-  const wave = getWave(eventId, waveId);
-
-  if (!wave?.channelId || !wave?.messageId) return;
-
-  try {
-    const channel = await client.channels.fetch(wave.channelId);
-    const message = await channel.messages.fetch(wave.messageId);
-    await message.edit(panelPayload(eventId, waveId));
-  } catch (error) {
-    console.error("Panel refresh failed:", error.message);
-  }
-}
-
-async function postPanel(interaction, eventId, waveId) {
-  const message = await interaction.channel.send(
-    panelPayload(eventId, waveId)
-  );
-
-  const wave = getWave(eventId, waveId);
-  wave.channelId = message.channelId;
-  wave.messageId = message.id;
-
-  saveData();
-  return message;
-}
-
-function validHostTeam(host, c1, c2) {
-  return new Set([host.id, c1.id, c2.id]).size === 3;
-}
-
-function createWave(name, channelId) {
-  return {
-    id: makeId(),
-    name,
-    open: true,
-    attendees: {},
-    waitlist: [],
-    channelId,
-    messageId: null,
-    createdAt: new Date().toISOString()
-  };
-}
-
-function entryFor(userId, ign, friendIgn, addedBy) {
+function entryFor(
+  userId,
+  ign,
+  gameTag,
+  friendIgn,
+  friendTag,
+  addedBy
+) {
   return {
     userId,
     ign: short(ign, 50),
+    gameTag: short(gameTag, 50),
     friendIgn: short(friendIgn, 50),
+    friendTag: short(friendTag, 50),
     addedBy,
     signedUpAt: new Date().toISOString()
   };
@@ -460,7 +432,7 @@ function enqueueOrConfirm(wave, entry) {
     return "confirmed";
   }
 
-  if (totalWaitingSeats(wave) + size <= WAITLIST_CAPACITY * 2) {
+  if (wave.waitlist.length < WAITLIST_CAPACITY) {
     wave.waitlist.push(entry);
     return "waitlist";
   }
@@ -469,14 +441,21 @@ function enqueueOrConfirm(wave, entry) {
 }
 
 function promoteWaiting(wave, userId) {
-  const index = wave.waitlist.findIndex(a => a.userId === userId);
+  const index = wave.waitlist.findIndex(
+    a => a.userId === userId
+  );
+
   if (index < 0) return false;
 
   const entry = wave.waitlist[index];
-  if (!seatsAvailable(wave, entry.friendIgn)) return false;
+
+  if (!seatsAvailable(wave, entry.friendIgn)) {
+    return false;
+  }
 
   wave.waitlist.splice(index, 1);
   wave.attendees[userId] = entry;
+
   return true;
 }
 
@@ -507,45 +486,201 @@ function getEventWaveOrReply(interaction, eventId, waveId) {
       content: "Event or wave not found. Use /ppg-admin to select one.",
       flags: MessageFlags.Ephemeral
     });
+
     return null;
   }
 
   return { event, wave };
 }
 
-// Dropdown: Discord allows a maximum of 25 options per menu.
+function formatEntry(a, index) {
+  let line =
+    `**${index + 1}.** <@${a.userId}> — **${a.ign}**` +
+    (a.gameTag ? ` | Tag: ${a.gameTag}` : "");
+
+  if (a.friendIgn) {
+    line += `\n   ↳ Friend: **${a.friendIgn}**` +
+      (a.friendTag ? ` | Tag: ${a.friendTag}` : "");
+  }
+
+  return line;
+}
+
+// ==================================================
+// PUBLIC SIGNUP PANEL
+// ==================================================
+
+function panelPayload(eventId, waveId) {
+  const event = getEvent(eventId);
+  const wave = getWave(eventId, waveId);
+
+  const seats = totalSeats(wave);
+  const attendees = Object.values(wave.attendees);
+
+  const embed = new EmbedBuilder()
+    .setColor(wave.open && !event.ended ? 0x238636 : 0x8b2635)
+    .setTitle(`🎉 ${event.name} — ${wave.name}`)
+    .setDescription(
+      `**Type:** ${event.type}\n` +
+      (event.dateText ? `**When:** ${event.dateText}\n` : "") +
+      `**Host:** <@${event.hostId}>\n` +
+      `**Co-hosts:** <@${event.cohost1Id}> and <@${event.cohost2Id}>\n\n` +
+      `**Attendee places:** ${seats}/${CAPACITY}\n` +
+      `**Waiting list:** ${wave.waitlist.length}/${WAITLIST_CAPACITY} signup(s)\n` +
+      `**Signups:** ${wave.open && !event.ended ? "🟢 OPEN" : "🔴 CLOSED"}\n\n` +
+      "**How to sign up:**\n" +
+      "Press **Sign Up** and enter your IGN and in-game Tag. " +
+      "Choose YES or NO to add a friend. If YES, enter your friend's IGN and Tag.\n\n" +
+      "Each person uses one attendee place."
+    )
+    .setFooter({
+      text: `Event ID: ${eventId} • Wave ID: ${waveId}`
+    });
+
+  if (attendees.length) {
+    const lines = attendees.map((a, i) => formatEntry(a, i));
+
+    let value = "";
+
+    for (const line of lines) {
+      if ((value + "\n" + line).length > 1000) {
+        value += "\n…";
+        break;
+      }
+
+      value += (value ? "\n" : "") + line;
+    }
+
+    embed.addFields({
+      name: "📋 Confirmed attendees",
+      value: value || "No confirmed attendees yet."
+    });
+  }
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`ppg:signup:${eventId}:${waveId}`)
+      .setLabel("Sign Up")
+      .setEmoji("📝")
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(!wave.open || event.ended),
+
+    new ButtonBuilder()
+      .setCustomId(`ppg:cancel:${eventId}:${waveId}`)
+      .setLabel("Cancel Signup")
+      .setEmoji("❌")
+      .setStyle(ButtonStyle.Danger)
+      .setDisabled(!wave.open || event.ended)
+  );
+
+  return {
+    embeds: [embed],
+    components: [row]
+  };
+}
+
+async function refreshPanel(eventId, waveId) {
+  const wave = getWave(eventId, waveId);
+
+  if (!wave?.channelId || !wave?.messageId) return;
+
+  try {
+    const channel = await client.channels.fetch(wave.channelId);
+    if (!channel?.messages) return;
+
+    const message = await channel.messages.fetch(wave.messageId);
+    await message.edit(panelPayload(eventId, waveId));
+  } catch (error) {
+    console.error("Panel refresh failed:", error.message);
+  }
+}
+
+async function postPanel(interaction, eventId, waveId) {
+  if (!interaction.channel?.send) {
+    throw new Error("Please use this command in a text channel.");
+  }
+
+  const message = await interaction.channel.send(
+    panelPayload(eventId, waveId)
+  );
+
+  const wave = getWave(eventId, waveId);
+
+  wave.channelId = message.channelId;
+  wave.messageId = message.id;
+
+  saveData();
+
+  return message;
+}
+
+// ==================================================
+// EVENT CREATION HELPERS
+// ==================================================
+
+function validHostTeam(host, c1, c2) {
+  return new Set([host.id, c1.id, c2.id]).size === 3;
+}
+
+function createWave(name, channelId) {
+  return {
+    id: makeId(),
+    name,
+    open: true,
+    attendees: {},
+    waitlist: [],
+    channelId,
+    messageId: null,
+    createdAt: new Date().toISOString()
+  };
+}
+
+// ==================================================
+// ADMIN DROPDOWN MENUS
+// ==================================================
+
 function adminEventMenu() {
   const events = Object.values(db.events).slice(-25);
+
   if (!events.length) return null;
 
   return new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId("ppgadmin:event")
       .setPlaceholder("Select an event")
-      .addOptions(events.map(event => ({
-        label: short(event.name, 100),
-        description: `${event.type}${event.ended ? " • Ended" : ""}`.slice(0, 100),
-        value: event.id
-      })))
+      .addOptions(
+        events.map(event => ({
+          label: short(event.name, 100),
+          description:
+            `${event.type}${event.ended ? " • Ended" : ""}`.slice(0, 100),
+          value: event.id
+        }))
+      )
   );
 }
 
 function adminWaveMenu(eventId) {
   const event = getEvent(eventId);
+
   if (!event) return null;
 
   const waves = Object.values(event.waves || {}).slice(0, 25);
+
   if (!waves.length) return null;
 
   return new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId(`ppgadmin:wave:${eventId}`)
       .setPlaceholder("Select a wave")
-      .addOptions(waves.map(wave => ({
-        label: short(wave.name, 100),
-        description: `${totalSeats(wave)}/22 attendees • ${wave.open ? "Open" : "Closed"}`.slice(0, 100),
-        value: wave.id
-      })))
+      .addOptions(
+        waves.map(wave => ({
+          label: short(wave.name, 100),
+          description:
+            `${totalSeats(wave)}/${CAPACITY} places • ` +
+            `${wave.open ? "Open" : "Closed"}`,
+          value: wave.id
+        }))
+      )
   );
 }
 
@@ -583,17 +718,31 @@ function adminActionMenu(eventId, waveId) {
         {
           label: "Repost signup panel",
           value: "panel",
-          description: "Post a new signup panel in this channel"
+          description: "Post a fresh signup panel"
         }
       )
   );
 }
 
+// ==================================================
+// READY EVENT
+// ==================================================
+
 client.once("ready", () => {
   console.log(`PPG Signup Bot online as ${client.user.tag}`);
 });
+
+// ==================================================
+// INTERACTION HANDLER
+// ==================================================
+
 client.on("interactionCreate", async interaction => {
   try {
+
+    // ==============================================
+    // SLASH COMMANDS
+    // ==============================================
+
     if (interaction.isChatInputCommand()) {
       const cmd = interaction.commandName;
 
@@ -604,6 +753,7 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
+      // ADMIN PANEL
       if (cmd === "ppg-admin") {
         const row = adminEventMenu();
 
@@ -621,6 +771,7 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
+      // CREATE EVENT
       if (cmd === "ppg-create") {
         const host = interaction.options.getUser("host");
         const c1 = interaction.options.getUser("cohost1");
@@ -638,7 +789,7 @@ client.on("interactionCreate", async interaction => {
 
         db.events[eventId] = {
           id: eventId,
-          name: short(interaction.options.getString("name")),
+          name: short(interaction.options.getString("name"), 80),
           type: interaction.options.getString("type"),
           dateText: short(interaction.options.getString("date") || "", 80),
           hostId: host.id,
@@ -660,11 +811,14 @@ client.on("interactionCreate", async interaction => {
         await postPanel(interaction, eventId, wave.id);
 
         return interaction.followUp({
-          content: `Event created. Event ID: \`${eventId}\`\nWave ID: \`${wave.id}\``,
+          content:
+            `Event created!\nEvent ID: \`${eventId}\`\n` +
+            `Wave ID: \`${wave.id}\``,
           flags: MessageFlags.Ephemeral
         });
       }
 
+      // LIST EVENTS
       if (cmd === "ppg-events") {
         const list = Object.values(db.events);
 
@@ -678,20 +832,22 @@ client.on("interactionCreate", async interaction => {
         return interaction.reply({
           content: list.slice(-25).map(e =>
             `**${e.name}** (${e.type}) — \`${e.id}\` — ` +
-            `${Object.keys(e.waves).length} wave(s)` +
+            `${Object.keys(e.waves || {}).length} wave(s)` +
             (e.ended ? " — ENDED" : "")
           ).join("\n").slice(0, 1900),
           flags: MessageFlags.Ephemeral
         });
       }
 
+      // STATISTICS
       if (cmd === "ppg-stats") {
         const all = Object.values(db.events);
         const waves = all.flatMap(e => Object.values(e.waves || {}));
 
         return interaction.reply({
           content:
-            `**PPG Statistics**\nEvents: ${all.length}\n` +
+            `**PPG Statistics**\n` +
+            `Events: ${all.length}\n` +
             `Waves: ${waves.length}\n` +
             `Confirmed places: ${waves.reduce((n, w) => n + totalSeats(w), 0)}\n` +
             `Waiting-list places: ${waves.reduce((n, w) => n + totalWaitingSeats(w), 0)}`,
@@ -702,17 +858,15 @@ client.on("interactionCreate", async interaction => {
       const eventId = interaction.options.getString("event_id");
       const event = eventId ? getEvent(eventId) : null;
 
-      if (
-        ["ppg-wave", "ppg-edit", "ppg-end", "ppg-delete"].includes(cmd) &&
-        !event
-      ) {
-        return interaction.reply({
-          content: "Event not found. Use /ppg-admin to select an event.",
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
+      // CREATE WAVE
       if (cmd === "ppg-wave") {
+        if (!event) {
+          return interaction.reply({
+            content: "Event not found. Use /ppg-events to find its ID.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
         const wave = createWave(
           short(interaction.options.getString("name"), 40),
           interaction.channelId
@@ -729,11 +883,25 @@ client.on("interactionCreate", async interaction => {
         await postPanel(interaction, eventId, wave.id);
 
         return interaction.followUp({
-          content: `Wave created. Event ID: \`${eventId}\` • Wave ID: \`${wave.id}\``,
+          content:
+            `Wave created!\nEvent ID: \`${eventId}\`\n` +
+            `Wave ID: \`${wave.id}\``,
           flags: MessageFlags.Ephemeral
         });
       }
 
+      // CHECK EVENT FOR EVENT-LEVEL COMMANDS
+      if (
+        ["ppg-edit", "ppg-end", "ppg-delete"].includes(cmd) &&
+        !event
+      ) {
+        return interaction.reply({
+          content: "Event not found. Use /ppg-events to find its ID.",
+          flags: MessageFlags.Ephemeral
+        });
+      }
+
+      // EDIT EVENT
       if (cmd === "ppg-edit") {
         const name = interaction.options.getString("name");
         const date = interaction.options.getString("date");
@@ -752,8 +920,11 @@ client.on("interactionCreate", async interaction => {
           });
         }
 
-        if (name) event.name = short(name);
-        if (date !== null) event.dateText = date === "-" ? "" : short(date, 80);
+        if (name !== null) event.name = short(name, 80);
+
+        if (date !== null) {
+          event.dateText = date === "-" ? "" : short(date, 80);
+        }
 
         event.hostId = h.id;
         event.cohost1Id = a.id;
@@ -771,6 +942,7 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
+      // END EVENT
       if (cmd === "ppg-end") {
         event.ended = true;
 
@@ -785,26 +957,22 @@ client.on("interactionCreate", async interaction => {
         }
 
         return interaction.reply({
-          content: `Ended **${event.name}**. Records were preserved.`,
+          content: `Ended **${event.name}**. Signup records were preserved.`,
           flags: MessageFlags.Ephemeral
         });
       }
 
+      // DELETE EVENT
       if (cmd === "ppg-delete") {
-        const confirm = interaction.options.getString("confirm");
-
-        if (confirm !== "DELETE") {
-          return interaction.reply({
-            content: "Deletion cancelled.",
-            flags: MessageFlags.Ephemeral
-          });
-        }
-
         for (const wave of Object.values(event.waves)) {
           try {
-            const ch = await client.channels.fetch(wave.channelId);
-            const msg = await ch.messages.fetch(wave.messageId);
-            await msg.delete();
+            if (!wave.channelId || !wave.messageId) continue;
+
+            const channel = await client.channels.fetch(wave.channelId);
+            if (!channel?.messages) continue;
+
+            const message = await channel.messages.fetch(wave.messageId);
+            await message.delete();
           } catch {}
         }
 
@@ -817,14 +985,25 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
+      // COMMANDS THAT NEED A WAVE
       const waveId = interaction.options.getString("wave_id");
       const found = getEventWaveOrReply(interaction, eventId, waveId);
+
       if (!found) return;
 
-      const { wave } = found;
+      const { event: selectedEvent, wave } = found;
 
+      // OPEN OR CLOSE SIGNUPS
       if (cmd === "ppg-open" || cmd === "ppg-close") {
+        if (selectedEvent.ended && cmd === "ppg-open") {
+          return interaction.reply({
+            content: "This event has ended. Create a new event to reopen signups.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
         wave.open = cmd === "ppg-open";
+
         saveData();
         await refreshPanel(eventId, waveId);
 
@@ -834,8 +1013,33 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
+      // MANUALLY ADD ATTENDEE
       if (cmd === "ppg-add") {
         const member = interaction.options.getUser("member");
+        const ign = short(interaction.options.getString("ign"), 50);
+        const gameTag = short(interaction.options.getString("gametag"), 50);
+        const friendIgn = short(
+          interaction.options.getString("friend_ign") || "",
+          50
+        );
+        const friendTag = short(
+          interaction.options.getString("friend_tag") || "",
+          50
+        );
+
+        if (hostIds(selectedEvent).includes(member.id)) {
+          return interaction.reply({
+            content: "The host team does not use attendee places.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        if (Boolean(friendIgn) !== Boolean(friendTag)) {
+          return interaction.reply({
+            content: "Please provide BOTH friend_ign and friend_tag, or leave both blank.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
 
         if (
           wave.attendees[member.id] ||
@@ -849,8 +1053,10 @@ client.on("interactionCreate", async interaction => {
 
         const entry = entryFor(
           member.id,
-          interaction.options.getString("ign"),
-          interaction.options.getString("friend_ign") || "",
+          ign,
+          gameTag,
+          friendIgn,
+          friendTag,
           interaction.user.id
         );
 
@@ -874,6 +1080,7 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
+      // REMOVE ATTENDEE
       if (cmd === "ppg-remove") {
         const member = interaction.options.getUser("member");
 
@@ -881,16 +1088,18 @@ client.on("interactionCreate", async interaction => {
           delete wave.attendees[member.id];
           promoteFirstFit(wave);
         } else {
-          const idx = wave.waitlist.findIndex(a => a.userId === member.id);
+          const index = wave.waitlist.findIndex(
+            a => a.userId === member.id
+          );
 
-          if (idx < 0) {
+          if (index < 0) {
             return interaction.reply({
               content: "That member is not on this wave's list.",
               flags: MessageFlags.Ephemeral
             });
           }
 
-          wave.waitlist.splice(idx, 1);
+          wave.waitlist.splice(index, 1);
         }
 
         saveData();
@@ -902,6 +1111,7 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
+      // PROMOTE FROM WAITLIST
       if (cmd === "ppg-promote") {
         const member = interaction.options.getUser("member");
 
@@ -921,6 +1131,7 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
+      // ATTENDEE LIST OR WAITLIST
       if (cmd === "ppg-list" || cmd === "ppg-waitlist") {
         const entries = cmd === "ppg-waitlist"
           ? wave.waitlist
@@ -933,40 +1144,68 @@ client.on("interactionCreate", async interaction => {
           });
         }
 
+        const lines = entries.map((a, i) => formatEntry(a, i));
+
         return interaction.reply({
-          content: entries.map((a, i) =>
-            `${i + 1}. <@${a.userId}> — ${a.ign}` +
-            (a.friendIgn ? ` (+1: ${a.friendIgn})` : "")
-          ).join("\n").slice(0, 1900),
+          content: lines.join("\n").slice(0, 1900),
           flags: MessageFlags.Ephemeral
         });
       }
 
+      // ATTENDANCE SUMMARY
       if (cmd === "ppg-attendance") {
         return interaction.reply({
           content:
-            `**${event.name} — ${wave.name}**\n` +
-            `Confirmed places: ${totalSeats(wave)}/22\n` +
+            `**${selectedEvent.name} — ${wave.name}**\n` +
+            `Confirmed places: ${totalSeats(wave)}/${CAPACITY}\n` +
             `Waiting-list places: ${totalWaitingSeats(wave)}\n` +
-            `Status: ${wave.open ? "Open" : "Closed"}`,
+            `Waiting-list signups: ${wave.waitlist.length}/${WAITLIST_CAPACITY}\n` +
+            `Status: ${wave.open && !selectedEvent.ended ? "Open" : "Closed"}`,
           flags: MessageFlags.Ephemeral
         });
       }
 
+      // CSV EXPORT
       if (cmd === "ppg-export") {
         const rows = [
-          ["Discord User ID", "IGN", "Friend IGN", "Status", "Signed Up At"]
+          [
+            "Discord User ID",
+            "IGN",
+            "In-Game Tag",
+            "Friend IGN",
+            "Friend Tag",
+            "Status",
+            "Signed Up At"
+          ]
         ];
 
         for (const a of Object.values(wave.attendees)) {
-          rows.push([a.userId, a.ign, a.friendIgn, "Confirmed", a.signedUpAt]);
+          rows.push([
+            a.userId,
+            a.ign,
+            a.gameTag,
+            a.friendIgn,
+            a.friendTag,
+            "Confirmed",
+            a.signedUpAt
+          ]);
         }
 
         for (const a of wave.waitlist) {
-          rows.push([a.userId, a.ign, a.friendIgn, "Waiting list", a.signedUpAt]);
+          rows.push([
+            a.userId,
+            a.ign,
+            a.gameTag,
+            a.friendIgn,
+            a.friendTag,
+            "Waiting list",
+            a.signedUpAt
+          ]);
         }
 
-        const csv = rows.map(row => row.map(csvCell).join(",")).join("\n");
+        const csv = rows
+          .map(row => row.map(csvCell).join(","))
+          .join("\n");
 
         const file = new AttachmentBuilder(
           Buffer.from(csv, "utf8"),
@@ -980,6 +1219,7 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
+      // POST A NEW PANEL
       if (cmd === "ppg-panel") {
         await postPanel(interaction, eventId, waveId);
 
@@ -989,7 +1229,11 @@ client.on("interactionCreate", async interaction => {
         });
       }
     }
-        // Admin dropdown selections
+
+    // ==============================================
+    // ADMIN DROPDOWN SELECTIONS
+    // ==============================================
+
     if (
       interaction.isStringSelectMenu() &&
       interaction.customId.startsWith("ppgadmin:")
@@ -1004,6 +1248,7 @@ client.on("interactionCreate", async interaction => {
       const parts = interaction.customId.split(":");
       const stage = parts[1];
 
+      // SELECT EVENT
       if (stage === "event") {
         const eventId = interaction.values[0];
         const event = getEvent(eventId);
@@ -1017,14 +1262,18 @@ client.on("interactionCreate", async interaction => {
         }
 
         return interaction.update({
-          content: `**PPG Admin Panel**\nEvent: **${event.name}**\nSelect a wave.`,
+          content:
+            `**🏛️ PPG Admin Panel**\n` +
+            `Event: **${event.name}**\nSelect a wave.`,
           components: [row]
         });
       }
 
+      // SELECT WAVE
       if (stage === "wave") {
         const eventId = parts[2];
         const waveId = interaction.values[0];
+
         const event = getEvent(eventId);
         const wave = getWave(eventId, waveId);
 
@@ -1037,17 +1286,20 @@ client.on("interactionCreate", async interaction => {
 
         return interaction.update({
           content:
-            `**PPG Admin Panel**\nEvent: **${event.name}**\n` +
-            `Wave: **${wave.name}** (${totalSeats(wave)}/22 attendees)\n` +
+            `**🏛️ PPG Admin Panel**\n` +
+            `Event: **${event.name}**\n` +
+            `Wave: **${wave.name}** (${totalSeats(wave)}/${CAPACITY} places)\n` +
             "Choose an action.",
           components: [adminActionMenu(eventId, waveId)]
         });
       }
 
+      // SELECT ADMIN ACTION
       if (stage === "action") {
         const eventId = parts[2];
         const waveId = parts[3];
         const action = interaction.values[0];
+
         const event = getEvent(eventId);
         const wave = getWave(eventId, waveId);
 
@@ -1059,7 +1311,15 @@ client.on("interactionCreate", async interaction => {
         }
 
         if (action === "open" || action === "close") {
+          if (event.ended && action === "open") {
+            return interaction.update({
+              content: "This event has ended. Create a new event to reopen signups.",
+              components: [adminActionMenu(eventId, waveId)]
+            });
+          }
+
           wave.open = action === "open";
+
           saveData();
           await refreshPanel(eventId, waveId);
 
@@ -1070,12 +1330,20 @@ client.on("interactionCreate", async interaction => {
         }
 
         if (action === "panel") {
+          if (!interaction.channel?.send) {
+            return interaction.update({
+              content: "Please use the admin panel in a text channel.",
+              components: [adminActionMenu(eventId, waveId)]
+            });
+          }
+
           const message = await interaction.channel.send(
             panelPayload(eventId, waveId)
           );
 
           wave.channelId = message.channelId;
           wave.messageId = message.id;
+
           saveData();
 
           return interaction.update({
@@ -1088,9 +1356,10 @@ client.on("interactionCreate", async interaction => {
           return interaction.update({
             content:
               `**${event.name} — ${wave.name}**\n` +
-              `Confirmed places: **${totalSeats(wave)}/22**\n` +
+              `Confirmed places: **${totalSeats(wave)}/${CAPACITY}**\n` +
               `Waiting-list places: **${totalWaitingSeats(wave)}**\n` +
-              `Signups: **${wave.open ? "Open" : "Closed"}**\n` +
+              `Waiting-list signups: **${wave.waitlist.length}/${WAITLIST_CAPACITY}**\n` +
+              `Signups: **${wave.open && !event.ended ? "Open" : "Closed"}**\n` +
               `Host: <@${event.hostId}>\n` +
               `Co-hosts: <@${event.cohost1Id}> and <@${event.cohost2Id}>`,
             components: [adminActionMenu(eventId, waveId)]
@@ -1110,10 +1379,7 @@ client.on("interactionCreate", async interaction => {
           });
         }
 
-        const lines = entries.map((a, i) =>
-          `${i + 1}. <@${a.userId}> — ${a.ign}` +
-          (a.friendIgn ? ` (+1: ${a.friendIgn})` : "")
-        );
+        const lines = entries.map((a, i) => formatEntry(a, i));
 
         return interaction.update({
           content:
@@ -1124,13 +1390,17 @@ client.on("interactionCreate", async interaction => {
       }
     }
 
-    // Signup and cancel buttons
+    // ==============================================
+    // SIGNUP AND CANCEL BUTTONS
+    // ==============================================
+
     if (interaction.isButton()) {
       const parts = interaction.customId.split(":");
 
       if (parts[0] !== "ppg") return;
 
       const [, action, eventId, waveId] = parts;
+
       const event = getEvent(eventId);
       const wave = getWave(eventId, waveId);
 
@@ -1141,11 +1411,14 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
+      // CANCEL SIGNUP
       if (action === "cancel") {
         if (wave.attendees[interaction.user.id]) {
           delete wave.attendees[interaction.user.id];
+
           promoteFirstFit(wave);
           saveData();
+
           await refreshPanel(eventId, waveId);
 
           return interaction.reply({
@@ -1160,6 +1433,7 @@ client.on("interactionCreate", async interaction => {
 
         if (index >= 0) {
           wave.waitlist.splice(index, 1);
+
           saveData();
           await refreshPanel(eventId, waveId);
 
@@ -1175,6 +1449,7 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
+      // START SIGNUP FORM
       if (action === "signup") {
         if (!wave.open || event.ended) {
           return interaction.reply({
@@ -1206,42 +1481,66 @@ client.on("interactionCreate", async interaction => {
 
         const ign = new TextInputBuilder()
           .setCustomId("ign")
-          .setLabel("Your in-game name (IGN)")
+          .setLabel("1. Your in-game name (IGN)")
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
-          .setMaxLength(50);
+          .setMaxLength(50)
+          .setPlaceholder("Enter your IGN");
+
+        const gameTag = new TextInputBuilder()
+          .setCustomId("gametag")
+          .setLabel("2. Your in-game Tag")
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(50)
+          .setPlaceholder("Enter your tag");
 
         const friendChoice = new TextInputBuilder()
           .setCustomId("friend")
-          .setLabel("Add a friend? Enter YES or NO")
+          .setLabel("3. Add a friend? Enter YES or NO")
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
           .setMaxLength(3)
-          .setPlaceholder("NO");
+          .setPlaceholder("YES or NO");
 
         const friendIgn = new TextInputBuilder()
           .setCustomId("friendign")
-          .setLabel("Friend's IGN (if YES)")
+          .setLabel("4. Friend's IGN (if YES)")
           .setStyle(TextInputStyle.Short)
           .setRequired(false)
-          .setMaxLength(50);
+          .setMaxLength(50)
+          .setPlaceholder("Leave blank if NO");
+
+        const friendTag = new TextInputBuilder()
+          .setCustomId("friendtag")
+          .setLabel("5. Friend's in-game Tag (if YES)")
+          .setStyle(TextInputStyle.Short)
+          .setRequired(false)
+          .setMaxLength(50)
+          .setPlaceholder("Leave blank if NO");
 
         modal.addComponents(
           new ActionRowBuilder().addComponents(ign),
+          new ActionRowBuilder().addComponents(gameTag),
           new ActionRowBuilder().addComponents(friendChoice),
-          new ActionRowBuilder().addComponents(friendIgn)
+          new ActionRowBuilder().addComponents(friendIgn),
+          new ActionRowBuilder().addComponents(friendTag)
         );
 
         return interaction.showModal(modal);
       }
     }
 
-    // Signup form submission
+    // ==============================================
+    // SIGNUP FORM SUBMISSION
+    // ==============================================
+
     if (
       interaction.isModalSubmit() &&
       interaction.customId.startsWith("ppgform:")
     ) {
       const [, eventId, waveId] = interaction.customId.split(":");
+
       const event = getEvent(eventId);
       const wave = getWave(eventId, waveId);
 
@@ -1274,6 +1573,11 @@ client.on("interactionCreate", async interaction => {
         50
       );
 
+      const gameTag = short(
+        interaction.fields.getTextInputValue("gametag"),
+        50
+      );
+
       const choice = short(
         interaction.fields.getTextInputValue("friend"),
         3
@@ -1284,7 +1588,13 @@ client.on("interactionCreate", async interaction => {
         50
       );
 
+      const friendTag = short(
+        interaction.fields.getTextInputValue("friendtag") || "",
+        50
+      );
+
       const wantsFriend = ["yes", "y"].includes(choice);
+      const saysNoFriend = ["no", "n"].includes(choice);
 
       if (!["yes", "y", "no", "n"].includes(choice)) {
         return interaction.reply({
@@ -1293,29 +1603,37 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
-      if (wantsFriend && !friendIgn) {
+      if (!ign || !gameTag) {
         return interaction.reply({
-          content: "You chose YES. Please enter your friend's IGN and sign up again.",
+          content: "Please enter both your IGN and your in-game Tag.",
           flags: MessageFlags.Ephemeral
         });
       }
 
-      if (!wantsFriend && friendIgn) {
+      if (wantsFriend && (!friendIgn || !friendTag)) {
         return interaction.reply({
-          content: "You entered a friend's IGN but chose NO. Please sign up again.",
+          content: "You chose YES. Please enter BOTH your friend's IGN and Tag, then submit again.",
           flags: MessageFlags.Ephemeral
         });
       }
 
-      const result = enqueueOrConfirm(
-        wave,
-        entryFor(
-          interaction.user.id,
-          ign,
-          wantsFriend ? friendIgn : "",
-          interaction.user.id
-        )
+      if (saysNoFriend && (friendIgn || friendTag)) {
+        return interaction.reply({
+          content: "You chose NO, so leave both friend fields blank and submit again.",
+          flags: MessageFlags.Ephemeral
+        });
+      }
+
+      const entry = entryFor(
+        interaction.user.id,
+        ign,
+        gameTag,
+        wantsFriend ? friendIgn : "",
+        wantsFriend ? friendTag : "",
+        interaction.user.id
       );
+
+      const result = enqueueOrConfirm(wave, entry);
 
       if (result === "full") {
         return interaction.reply({
@@ -1327,15 +1645,22 @@ client.on("interactionCreate", async interaction => {
       saveData();
       await refreshPanel(eventId, waveId);
 
+      const statusText = result === "confirmed"
+        ? "You're confirmed"
+        : "You've been added to the waiting list";
+
       return interaction.reply({
-        content: result === "confirmed"
-          ? `You're confirmed for **${event.name} — ${wave.name}**` +
-            (wantsFriend ? ` with +1: **${friendIgn}**.` : ".")
-          : `You've been added to the waiting list for **${event.name} — ${wave.name}**` +
-            (wantsFriend ? ` with +1: **${friendIgn}**.` : "."),
+        content:
+          `${statusText} for **${event.name} — ${wave.name}**.\n` +
+          `**IGN:** ${ign}\n` +
+          `**Tag:** ${gameTag}` +
+          (wantsFriend
+            ? `\n**Friend:** ${friendIgn}\n**Friend's Tag:** ${friendTag}`
+            : "\n**Friend:** No"),
         flags: MessageFlags.Ephemeral
       });
     }
+
   } catch (error) {
     console.error("Interaction failed:", error);
 
@@ -1352,6 +1677,10 @@ client.on("interactionCreate", async interaction => {
   }
 });
 
+// ==================================================
+// START BOT AND REGISTER SLASH COMMANDS
+// ==================================================
+
 async function start() {
   const rest = new REST({ version: "10" }).setToken(TOKEN);
 
@@ -1361,6 +1690,7 @@ async function start() {
   );
 
   console.log("PPG slash commands registered.");
+
   await client.login(TOKEN);
 }
 
