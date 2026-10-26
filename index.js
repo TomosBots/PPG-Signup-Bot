@@ -925,13 +925,6 @@ client.on("interactionCreate", async interaction => {
       }
 
       // Prevent old events' Discord-ID hosts from taking attendee places.
-      if (hostIds(event).includes(interaction.user.id)) {
-        return interaction.reply({
-          content: "Host team members do not use attendee places.",
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
       if (
         wave.attendees[interaction.user.id] ||
         wave.waitlist.some(entry => entry.userId === interaction.user.id)
@@ -1623,13 +1616,6 @@ const allEntries = [
           });
         }
 
-        if (hostIds(event).includes(interaction.user.id)) {
-          return interaction.reply({
-            content: "Hosts cannot sign up to their own event.",
-            ephemeral: true
-          });
-        }
-
         const ign = interaction.fields.getTextInputValue("ign").trim();
         const tag = interaction.fields.getTextInputValue("gametag").trim();
         const friendAnswer = interaction.fields.getTextInputValue("friend").trim().toLowerCase();
@@ -1666,7 +1652,10 @@ const allEntries = [
           });
         }
 
-        const allEntries = [...wave.attendees, ...wave.waitlist];
+        const allEntries = [
+  ...Object.values(wave.attendees || {}),
+  ...(Array.isArray(wave.waitlist) ? wave.waitlist : [])
+];
 
         if (allEntries.some(entry => entry.userId === interaction.user.id)) {
           return interaction.reply({
