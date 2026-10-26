@@ -482,40 +482,16 @@ function createEventModal() {
     .setRequired(true);
 
   const type = new TextInputBuilder()
-  .setCustomId("type")
-  .setLabel("Event type")
-  .setStyle(TextInputStyle.Short)
-  .setMaxLength(20)
-  .setRequired(true)
-  .setPlaceholder("200 Sponty, 400 Gems, 600 Gems or 1K Gems");
-
-  const host = new TextInputBuilder()
-    .setCustomId("host")
-    .setLabel("Host Discord ID or mention")
+    .setCustomId("type")
+    .setLabel("Event type")
     .setStyle(TextInputStyle.Short)
-    .setMaxLength(30)
-    .setRequired(true);
-
-  const cohost1 = new TextInputBuilder()
-    .setCustomId("cohost1")
-    .setLabel("First co-host Discord ID or mention")
-    .setStyle(TextInputStyle.Short)
-    .setMaxLength(30)
-    .setRequired(true);
-
-  const cohost2 = new TextInputBuilder()
-    .setCustomId("cohost2")
-    .setLabel("Second co-host Discord ID or mention")
-    .setStyle(TextInputStyle.Short)
-    .setMaxLength(30)
-    .setRequired(true);
+    .setMaxLength(20)
+    .setRequired(true)
+    .setPlaceholder("200 Sponty, 400 Gems, 600 Gems or 1K Gems");
 
   modal.addComponents(
     new ActionRowBuilder().addComponents(name),
-    new ActionRowBuilder().addComponents(type),
-    new ActionRowBuilder().addComponents(host),
-    new ActionRowBuilder().addComponents(cohost1),
-    new ActionRowBuilder().addComponents(cohost2)
+    new ActionRowBuilder().addComponents(type)
   );
 
   return modal;
@@ -836,6 +812,149 @@ client.on("interactionCreate", async interaction => {
 
       return interaction.showModal(modal);
     }
+
+    // ==========================================
+// DISCORD MEMBER PICKERS FOR EVENT CREATION
+// ==========================================
+
+if (interaction.isUserSelectMenu()) {
+  if (!interaction.customId.startsWith("ppg:pick:")) return;
+
+  if (!isAdmin(interaction)) {
+    return interaction.reply({
+      content: "Administrator permission is required.",
+      flags: MessageFlags.Ephemeral
+    });
+  }
+
+  const parts = interaction.customId.split(":");
+  const stage = parts[2];
+  const key = parts[3];
+  const draft = pending.get(key);
+
+  if (!draft || draft.userId !== interaction.user.id) {
+    return interaction.update({
+      content: "This event creation session has expired. Press Create Event again.",
+      components: []
+    });
+  }
+
+  const selectedId = interaction.users.first()?.id;
+
+  if (!selectedId) {
+    return interaction.reply({
+      content: "Please select a Discord member.",
+      flags: MessageFlags.Ephemeral
+    });
+  }
+
+  if (stage === "host") {
+    draft.hostId = selectedId;
+
+    const picker = new ActionRowBuilder().addComponents(
+      new UserSelectMenuBuilder()
+        .setCustomId(`ppg:pick:cohost1:${key}`)
+        .setPlaceholder("Choose the first co-host")
+        .setMinValues(1)
+        .setMaxValues(1)
+    );
+
+    return interaction.update({
+      content: `Host selected: <@${selectedId}>\nNow choose the first co-host.`,
+      components: [picker]
+    });
+  }
+
+  if (stage === "cohost1") {
+    if (selectedId === draft.hostId) {
+      return interaction.reply({
+        content: "The host and co-hosts must be different people. Choose another member.",
+        flags: MessageFlags.Ephemeral
+      });
+    }
+
+    draft.cohost1Id = selectedId;
+
+    const picker = new ActionRowBuilder().addComponents(
+      new UserSelectMenuBuilder()
+        .setCustomId(`ppg:pick:cohost2:${key}`)
+        .setPlaceholder("Choose the second co-host")
+        .setMinValues(1)
+        .setMaxValues(1)
+    );
+
+    return interaction.update({
+      content:
+        `Host: <@${draft.hostId}>\n` +
+        `First co-host: <@${selectedId}>\n` +
+        "Now choose the second co-host.",
+      components: [picker]
+    });
+  }
+
+  if (stage === "cohost2") {
+    if (
+      selectedId === draft.hostId ||
+      selectedId === draft.cohost1Id
+    ) {
+      return interaction.reply({
+        content: "All three people must be different. Choose another member.",
+        flags: MessageFlags.Ephemeral
+      });
+    }
+
+    draft.cohost2Id = selectedId;
+
+    const eventId = makeId();
+    const wave = createWave("Wave 1", draft.channelId);
+
+    db.events[eventId] = {
+      id: eventId,
+      name: draft.name,
+      type: draft.type,
+      dateText: "",
+      hostId: draft.hostId,
+      cohost1Id: draft.cohost1Id,
+      cohost2Id: draft.cohost2Id,
+      createdBy: interaction.user.id,
+      createdAt: new Date().toISOString(),
+      ended: false,
+      waves: { [wave.id]: wave }
+    };
+
+    saveData();
+    pending.delete(key);
+
+    await interaction.update({
+      content:
+        `✅ Created **${draft.name}**!\n` +
+        `Host: <@${draft.hostId}>\n` +
+        `Co-hosts: <@${draft.cohost1Id}> and <@${draft.cohost2Id}>\n` +
+        "Posting the Wave 1 signup panel…",
+      components: []
+    });
+
+    const channel = await client.channels.fetch(draft.channelId);
+
+    if (!channel?.send) {
+      return interaction.followUp({
+        content: "Event saved, but I couldn't post the signup panel in the original channel.",
+        flags: MessageFlags.Ephemeral
+      });
+    }
+
+    const message = await channel.send(panelPayload(eventId, wave.id));
+
+    wave.channelId = message.channelId;
+    wave.messageId = message.id;
+    saveData();
+
+    return interaction.followUp({
+      content: `Signup panel posted! Event ID: \`${eventId}\``,
+      flags: MessageFlags.Ephemeral
+    });
+  }
+}
 
     // ==========================================
     // SELECT MENUS
@@ -1181,86 +1300,72 @@ client.on("interactionCreate", async interaction => {
     if (interaction.isModalSubmit()) {
       const id = interaction.customId;
 
-      // Create event
-      if (id === "ppgform:create-event") {
-        if (!isAdmin(interaction)) {
-          return interaction.reply({
-            content: "Administrator permission is required.",
-            flags: MessageFlags.Ephemeral
-          });
-        }
+      // Create event: collect details, then select Discord members
+if (id === "ppgform:create-event") {
+  if (!isAdmin(interaction)) {
+    return interaction.reply({
+      content: "Administrator permission is required.",
+      flags: MessageFlags.Ephemeral
+    });
+  }
 
-        const name = short(interaction.fields.getTextInputValue("name"), 80);
-        const typeInput = short(interaction.fields.getTextInputValue("type"), 20).toLowerCase();
+  const name = short(
+    interaction.fields.getTextInputValue("name"),
+    80
+  );
 
-        const typeMap = {
-          "200": "200 Sponty",
-          "200 sponty": "200 Sponty",
-          "400": "400 Gems",
-          "400 gems": "400 Gems",
-          "600": "600 Gems",
-          "600 gems": "600 Gems",
-          "1k": "1K Gems",
-          "1k gems": "1K Gems"
-        };
+  const typeInput = short(
+    interaction.fields.getTextInputValue("type"),
+    20
+  ).toLowerCase();
 
-        const type = typeMap[typeInput];
-        const hostId = parseUserId(interaction.fields.getTextInputValue("host"));
-        const cohost1Id = parseUserId(interaction.fields.getTextInputValue("cohost1"));
-        const cohost2Id = parseUserId(interaction.fields.getTextInputValue("cohost2"));
+  const typeMap = {
+    "200": "200 Sponty",
+    "200 sponty": "200 Sponty",
+    "400": "400 Gems",
+    "400 gems": "400 Gems",
+    "600": "600 Gems",
+    "600 gems": "600 Gems",
+    "1k": "1K Gems",
+    "1k gems": "1K Gems"
+  };
 
-        if (!type) {
-          return interaction.reply({
-            content: "Invalid event type. Use 200 Sponty, 400 Gems, 600 Gems, or 1K Gems.",
-            flags: MessageFlags.Ephemeral
-          });
-        }
+  const type = typeMap[typeInput];
 
-        if (!hostId || !cohost1Id || !cohost2Id) {
-          return interaction.reply({
-            content: "One or more Discord IDs or mentions are invalid.",
-            flags: MessageFlags.Ephemeral
-          });
-        }
+  if (!type) {
+    return interaction.reply({
+      content: "Enter 200 Sponty, 400 Gems, 600 Gems or 1K Gems.",
+      flags: MessageFlags.Ephemeral
+    });
+  }
 
-        if (new Set([hostId, cohost1Id, cohost2Id]).size !== 3) {
-          return interaction.reply({
-            content: "Host and co-hosts must be three different people.",
-            flags: MessageFlags.Ephemeral
-          });
-        }
+  const key = makeId();
 
-        const eventId = makeId();
-        const wave = createWave("Wave 1", interaction.channelId);
+  pending.set(key, {
+    userId: interaction.user.id,
+    name,
+    type,
+    channelId: interaction.channelId,
+    createdAt: Date.now()
+  });
 
-        db.events[eventId] = {
-          id: eventId,
-          name,
-          type,
-          dateText: "",
-          hostId,
-          cohost1Id,
-          cohost2Id,
-          createdBy: interaction.user.id,
-          createdAt: new Date().toISOString(),
-          ended: false,
-          waves: { [wave.id]: wave }
-        };
+  const picker = new ActionRowBuilder().addComponents(
+    new UserSelectMenuBuilder()
+      .setCustomId(`ppg:pick:host:${key}`)
+      .setPlaceholder("Choose the event host")
+      .setMinValues(1)
+      .setMaxValues(1)
+  );
 
-        saveData();
-
-        await interaction.reply({
-          content: `Created **${name}**. Posting Wave 1 signup panel…`,
-          flags: MessageFlags.Ephemeral
-        });
-
-        await postPanel(interaction, eventId, wave.id);
-
-        return interaction.followUp({
-          content: `Event created!\nEvent ID: \`${eventId}\`\nWave 1 ID: \`${wave.id}\``,
-          flags: MessageFlags.Ephemeral
-        });
-      }
+  return interaction.reply({
+    content:
+      `**Create Event: ${name}**\n` +
+      `Type: **${type}**\n\n` +
+      "First, select the host from the Discord member picker.",
+    components: [picker],
+    flags: MessageFlags.Ephemeral
+  });
+}
 
       // Create wave
       if (id.startsWith("ppgform:create-wave:")) {
