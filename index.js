@@ -1115,7 +1115,7 @@ return interaction.update({
   content: message.slice(0, 1900),
   components: []
 });
-
+      }
       // Confirm event cancellation
       if (id.startsWith("ppg:cancel-confirm:")) {
         const eventId = id.split(":")[2];
