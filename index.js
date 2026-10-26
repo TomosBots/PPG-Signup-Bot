@@ -292,7 +292,7 @@ function promoteWaiting(wave, userId) {
 
 function formatEntry(entry, index) {
   let text =
-    `**${index + 1}.** <@${entry.userId}> — **${entry.ign}**` +
+    `**${index + 1}.** ${entry.userId ? `<@${entry.userId}>` : `**${entry.ign}**`}` +
     (entry.gameTag ? ` | Tag: ${entry.gameTag}` : "");
 
   if (entry.friendIgn) {
