@@ -635,9 +635,9 @@ function entryModal(eventId, waveId) {
 
   const memberId = new TextInputBuilder()
     .setCustomId("memberid")
-    .setLabel("Discord member ID")
+    .setLabel("Discord ID (optional)")
     .setStyle(TextInputStyle.Short)
-    .setRequired(true)
+    .setRequired(false)
     .setMaxLength(30);
 
   modal.addComponents(
