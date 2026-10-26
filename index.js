@@ -1235,15 +1235,26 @@ client.on("interactionCreate", async interaction => {
           });
 
           for (const batch of batches) {
-            await interaction.channel.send({
-              content:
-                `📣 **PPG Event Reminder — ${event.name} | ${wave.name}**\n` +
-                batch.map(userId => `<@${userId}>`).join(" "),
-              allowedMentions: {
-                users: batch,
-                parse: []
-              }
-            });
+  const pingMessage = await interaction.channel.send({
+    content:
+      `📣 **PPG Event Reminder — ${event.name} | ${wave.name}**\n` +
+      batch.map(userId => `<@${userId}>`).join(" "),
+    allowedMentions: {
+      users: batch,
+      parse: []
+    }
+  });
+
+  if (!Array.isArray(wave.pingMessages)) {
+    wave.pingMessages = [];
+  }
+
+  wave.pingMessages.push({
+    channelId: pingMessage.channelId,
+    messageId: pingMessage.id
+  });
+
+  saveData();
           }
 
           return;
@@ -1685,11 +1696,11 @@ const allEntries = [
         await refreshPanel(eventId, waveId);
 
         return interaction.reply({
-          content: result.status === "confirmed"
-            ? `You're confirmed for **${event.name} — ${wave.name}**!`
-            : `You're on the waiting list for **${event.name} — ${wave.name}**.`,
-          ephemeral: true
-        });
+  content: result.status === "confirmed"
+    ? `You're confirmed, **${ign}**, for **${event.name} — ${wave.name}**!`
+    : `You're on the waiting list, **${ign}**, for **${event.name} — ${wave.name}**.`,
+  ephemeral: true
+});
       }
     }
   } catch (error) {
