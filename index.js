@@ -211,23 +211,48 @@ function seatsAvailable(wave, friendIgn) {
   return CAPACITY - totalSeats(wave) >= (friendIgn ? 2 : 1);
 }
 
+
 function enqueueOrConfirm(wave, entry) {
+  if (
+    !wave.attendees ||
+    typeof wave.attendees !== "object" ||
+    Array.isArray(wave.attendees)
+  ) {
+    wave.attendees = {};
+  }
+
+  if (!Array.isArray(wave.waitlist)) {
+    wave.waitlist = [];
+  }
+
   const size = 1 + (entry.friendIgn ? 1 : 0);
 
   if (
     totalSeats(wave) + size <= CAPACITY &&
     wave.waitlist.length === 0
   ) {
-    wave.attendees[entry.userId] = entry;
-    return "confirmed";
+    wave.attendees[String(entry.userId)] = {
+      ...entry,
+      gameTag: entry.gameTag || entry.tag || ""
+    };
+
+    return { ok: true, status: "confirmed" };
   }
 
   if (wave.waitlist.length < WAITLIST_CAPACITY) {
-    wave.waitlist.push(entry);
-    return "waitlist";
+    wave.waitlist.push({
+      ...entry,
+      gameTag: entry.gameTag || entry.tag || ""
+    });
+
+    return { ok: true, status: "waitlist" };
   }
 
-  return "full";
+  return {
+    ok: false,
+    status: "full",
+    message: "There are no available places or waiting-list slots."
+  };
 }
 
 function promoteFirstFit(wave) {
@@ -1546,12 +1571,10 @@ client.on("interactionCreate", async interaction => {
             ephemeral: true
           });
         }
-
-        
-if (!Array.isArray(wave.attendees)) wave.attendees = [];
-if (!Array.isArray(wave.waitlist)) wave.waitlist = [];
-
-const allEntries = [...wave.attendees, ...wave.waitlist];
+const allEntries = [
+  ...Object.values(wave.attendees || {}),
+  ...wave.waitlist
+];
 
         if (allEntries.some(entry => entry.userId === memberId)) {
           return interaction.reply({
