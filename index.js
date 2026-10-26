@@ -1164,6 +1164,44 @@ if (interaction.isUserSelectMenu()) {
           });
         }
 
+        if (selected === "ping") {
+  const attendeeIds = Object.keys(wave.attendees);
+
+  if (!attendeeIds.length) {
+    return interaction.update({
+      content: "There are no confirmed attendees to ping.",
+      components: [waveActionsMenu(eventId, waveId)]
+    });
+  }
+
+  // Discord limits a message to 2,000 characters.
+  // Send mentions in batches to avoid exceeding that limit.
+  const batches = [];
+
+  for (let i = 0; i < attendeeIds.length; i += 40) {
+    batches.push(attendeeIds.slice(i, i + 40));
+  }
+
+  await interaction.update({
+    content: `📣 Sending a ping to ${attendeeIds.length} confirmed attendee(s)…`,
+    components: [waveActionsMenu(eventId, waveId)]
+  });
+
+  for (const batch of batches) {
+    await interaction.channel.send({
+      content:
+        `📣 **PPG Event Reminder — ${event.name} | ${wave.name}**\n` +
+        batch.map(userId => `<@${userId}>`).join(" "),
+      allowedMentions: {
+        users: batch,
+        parse: []
+      }
+    });
+  }
+
+  return;
+        }
+        
         if (selected === "attendance") {
           return interaction.update({
             content:
