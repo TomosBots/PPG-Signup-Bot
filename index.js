@@ -1547,7 +1547,11 @@ client.on("interactionCreate", async interaction => {
           });
         }
 
-        const allEntries = [...wave.attendees, ...wave.waitlist];
+        
+if (!Array.isArray(wave.attendees)) wave.attendees = [];
+if (!Array.isArray(wave.waitlist)) wave.waitlist = [];
+
+const allEntries = [...wave.attendees, ...wave.waitlist];
 
         if (allEntries.some(entry => entry.userId === memberId)) {
           return interaction.reply({
