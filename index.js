@@ -1,3 +1,4 @@
+
 require("dotenv").config();
 
 const {
@@ -6,7 +7,6 @@ const {
   REST,
   Routes,
   SlashCommandBuilder,
-  PermissionFlagsBits,
   EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
@@ -31,105 +31,24 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const ADMIN_ROLE_ID = "1496238349722325103";
+
 const DATA_DIR = process.env.DATA_DIR || "/data";
 const DATA_FILE = path.join(DATA_DIR, "ppg-data.json");
 
-
-
 const CAPACITY = 22;
 const WAITLIST_CAPACITY = 5;
-const CONFIRM_TIMEOUT = 10 * 60 * 1000;
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
-  throw new Error("Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID.");
+  throw new Error(
+    "Missing DISCORD_TOKEN, CLIENT_ID or GUILD_ID."
+  );
 }
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
-function short(value, max = 80) {
-  return String(value ?? "").trim().slice(0, max);
-}
-
-function makeId() {
-  return crypto.randomBytes(4).toString("hex");
-}
-
-function readData() {
-  try {
-    const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
-
-    if (!data || typeof data !== "object" || Array.isArray(data)) {
-      return { events: {} };
-    }
-
-    return data;
-  } catch (error) {
-    if (error.code === "ENOENT") return { events: {} };
-    throw error;
-  }
-}
-
-
-function saveData() {
-  const temp = `${DATA_FILE}.tmp`;
-
-  fs.writeFileSync(temp, JSON.stringify(db, null, 2), {
-    mode: 0o600
-  });
-
-  fs.renameSync(temp, DATA_FILE);
-}
-
-
-let db = readData();
-
-if (!db.events || typeof db.events !== "object" || Array.isArray(db.events)) {
-  db = { events: {} };
-}
-
-
- // Preserve saved events and normalise wave data.
-for (const event of Object.values(db.events)) {
-  if (!event.waves || typeof event.waves !== "object" || Array.isArray(event.waves)) {
-    event.waves = {};
-  }
-
-  for (const wave of Object.values(event.waves)) {
-    if (!Array.isArray(wave.attendees)) {
-      wave.attendees = wave.attendees && typeof wave.attendees === "object"
-        ? Object.values(wave.attendees)
-        : [];
-    }
-
-    if (!Array.isArray(wave.waitlist)) {
-      wave.waitlist = wave.waitlist && typeof wave.waitlist === "object"
-        ? Object.values(wave.waitlist)
-        : [];
-    }
-
-    for (const entry of wave.attendees) {
-      entry.gameTag ||= entry.tag || "";
-      entry.friendIgn ||= "";
-      entry.friendTag ||= "";
-    }
-
-    for (const entry of wave.waitlist) {
-      entry.gameTag ||= entry.tag || "";
-      entry.friendIgn ||= "";
-      entry.friendTag ||= "";
-    }
-
-    wave.open ??= false;
-  }
-}
-
-saveData();
-
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
-
-const pending = new Map();
 
 const eventTypes = [
   { name: "200 Sponty", value: "200 Sponty" },
@@ -138,7 +57,6 @@ const eventTypes = [
   { name: "1K Gems", value: "1K Gems" }
 ];
 
-// Register only one slash command: /ppg
 const commands = [
   new SlashCommandBuilder()
     .setName("ppg")
@@ -147,34 +65,166 @@ const commands = [
     .toJSON()
 ];
 
+// ==================================================
+// DATA STORAGE
+// ==================================================
+
+function makeId() {
+  return crypto.randomBytes(4).toString("hex");
+}
+
+function short(value, max = 80) {
+  return String(value ?? "").trim().slice(0, max);
+}
+
+function readData() {
+  try {
+    const data = JSON.parse(
+      fs.readFileSync(DATA_FILE, "utf8")
+    );
+
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      return { events: {} };
+    }
+
+    return data;
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return { events: {} };
+    }
+
+    throw error;
+  }
+}
+
+let db = readData();
+
+if (
+  !db.events ||
+  typeof db.events !== "object" ||
+  Array.isArray(db.events)
+) {
+  db.events = {};
+}
+
+function saveData() {
+  const temp = `${DATA_FILE}.tmp`;
+
+  fs.writeFileSync(
+    temp,
+    JSON.stringify(db, null, 2),
+    { mode: 0o600 }
+  );
+
+  fs.renameSync(temp, DATA_FILE);
+}
+
+function normaliseEntry(entry) {
+  entry = entry && typeof entry === "object" ? entry : {};
+
+  entry.userId =
+    entry.userId && String(entry.userId) !== "null"
+      ? String(entry.userId)
+      : null;
+
+  entry.ign = short(entry.ign, 50);
+  entry.gameTag = short(entry.gameTag || entry.tag || "", 50);
+  entry.tag = entry.gameTag;
+  entry.friendIgn = short(entry.friendIgn || "", 50);
+  entry.friendTag = short(entry.friendTag || "", 50);
+
+  return entry;
+}
+
+function normaliseWave(wave) {
+  wave.attendees = Array.isArray(wave.attendees)
+    ? Object.fromEntries(
+        wave.attendees.map((entry, index) => {
+          const item = normaliseEntry(entry);
+          const key = item.userId || `guest_migrated_${index}_${makeId()}`;
+          return [key, item];
+        })
+      )
+    : wave.attendees &&
+        typeof wave.attendees === "object"
+      ? Object.fromEntries(
+          Object.entries(wave.attendees).map(([key, entry]) => [
+            key,
+            normaliseEntry(entry)
+          ])
+        )
+      : {};
+
+  wave.waitlist = Array.isArray(wave.waitlist)
+    ? wave.waitlist.map(normaliseEntry)
+    : wave.waitlist &&
+        typeof wave.waitlist === "object"
+      ? Object.values(wave.waitlist).map(normaliseEntry)
+      : [];
+
+  wave.open ??= false;
+  wave.pingMessages ??= [];
+
+  return wave;
+}
+
+// Migrate old attendee arrays into the object format used by the bot.
+for (const [eventId, event] of Object.entries(db.events)) {
+  event.id ||= eventId;
+  event.waves ||= {};
+
+  if (
+    !event.waves ||
+    typeof event.waves !== "object" ||
+    Array.isArray(event.waves)
+  ) {
+    event.waves = {};
+  }
+
+  for (const [waveId, wave] of Object.entries(event.waves)) {
+    wave.id ||= waveId;
+    wave.name ||= "Wave";
+    wave.attendees ??= {};
+    wave.waitlist ??= [];
+    normaliseWave(wave);
+  }
+}
+
+saveData();
+
+// ==================================================
+// EVENT HELPERS
+// ==================================================
+
 function isPPGAdmin(interaction) {
   return interaction.member?.roles?.cache?.has(ADMIN_ROLE_ID) ?? false;
 }
 
-function getEvent(id) {
-  return db.events[id];
+function getEvent(eventId) {
+  return db.events[eventId];
 }
 
 function getWave(eventId, waveId) {
   return getEvent(eventId)?.waves?.[waveId];
 }
 
-function hostIds(event) {
-  return [event.hostId, event.cohost1Id, event.cohost2Id];
-}
-
 function totalSeats(wave) {
-  return Object.values(wave.attendees).reduce(
+  return Object.values(wave.attendees || {}).reduce(
     (sum, entry) => sum + 1 + (entry.friendIgn ? 1 : 0),
     0
   );
 }
 
 function totalWaitingSeats(wave) {
-  return wave.waitlist.reduce(
+  return (wave.waitlist || []).reduce(
     (sum, entry) => sum + 1 + (entry.friendIgn ? 1 : 0),
     0
   );
+}
+
+function seatsAvailable(wave, entry) {
+  const size = 1 + (entry.friendIgn ? 1 : 0);
+  return totalSeats(wave) + size <= CAPACITY;
 }
 
 function createWave(name, channelId) {
@@ -186,44 +236,14 @@ function createWave(name, channelId) {
     waitlist: [],
     channelId,
     messageId: null,
+    pingMessages: [],
     createdAt: new Date().toISOString()
   };
 }
 
-function parseUserId(value) {
-  const match = String(value || "").match(/\d{17,20}/);
-  return match ? match[0] : null;
-}
-
-function entryFor(userId, ign, gameTag, friendIgn, friendTag, addedBy) {
-  return {
-    userId,
-    ign: short(ign, 50),
-    gameTag: short(gameTag, 50),
-    friendIgn: short(friendIgn, 50),
-    friendTag: short(friendTag, 50),
-    addedBy,
-    signedUpAt: new Date().toISOString()
-  };
-}
-
-function seatsAvailable(wave, friendIgn) {
-  return CAPACITY - totalSeats(wave) >= (friendIgn ? 2 : 1);
-}
-
-
 function enqueueOrConfirm(wave, entry) {
-  if (
-    !wave.attendees ||
-    typeof wave.attendees !== "object" ||
-    Array.isArray(wave.attendees)
-  ) {
-    wave.attendees = {};
-  }
-
-  if (!Array.isArray(wave.waitlist)) {
-    wave.waitlist = [];
-  }
+  wave.attendees ||= {};
+  wave.waitlist ||= [];
 
   const size = 1 + (entry.friendIgn ? 1 : 0);
 
@@ -231,9 +251,12 @@ function enqueueOrConfirm(wave, entry) {
     totalSeats(wave) + size <= CAPACITY &&
     wave.waitlist.length === 0
   ) {
-    wave.attendees[String(entry.userId)] = {
+    const key = entry.userId || `guest_${makeId()}`;
+
+    wave.attendees[key] = {
       ...entry,
-      gameTag: entry.gameTag || entry.tag || ""
+      gameTag: entry.gameTag || entry.tag || "",
+      tag: entry.gameTag || entry.tag || ""
     };
 
     return { ok: true, status: "confirmed" };
@@ -242,7 +265,8 @@ function enqueueOrConfirm(wave, entry) {
   if (wave.waitlist.length < WAITLIST_CAPACITY) {
     wave.waitlist.push({
       ...entry,
-      gameTag: entry.gameTag || entry.tag || ""
+      gameTag: entry.gameTag || entry.tag || "",
+      tag: entry.gameTag || entry.tag || ""
     });
 
     return { ok: true, status: "waitlist" };
@@ -256,63 +280,64 @@ function enqueueOrConfirm(wave, entry) {
 }
 
 function promoteFirstFit(wave) {
+  wave.waitlist ||= [];
+  wave.attendees ||= {};
+
   let changed = true;
 
   while (changed) {
     changed = false;
 
-    const index = wave.waitlist.findIndex(
-      entry => seatsAvailable(wave, entry.friendIgn)
+    const index = wave.waitlist.findIndex(entry =>
+      seatsAvailable(wave, entry)
     );
 
     if (index >= 0) {
       const entry = wave.waitlist.splice(index, 1)[0];
-      wave.attendees[entry.userId] = entry;
+      const key = entry.userId || `guest_${makeId()}`;
+
+      wave.attendees[key] = entry;
       changed = true;
     }
   }
 }
 
-
-function promoteWaiting(wave, userId) {
-  const index = wave.waitlist.findIndex(
-    entry => entry.userId === userId
-  );
-
-  if (index < 0) return false;
-
+function promoteWaitingEntry(wave, index) {
   const entry = wave.waitlist[index];
 
-  if (!seatsAvailable(wave, entry.friendIgn)) return false;
+  if (!entry || !seatsAvailable(wave, entry)) {
+    return false;
+  }
 
   wave.waitlist.splice(index, 1);
 
-  if (entry.userId) {
-    wave.attendees[entry.userId] = entry;
-  } else {
-    const guestKey = `guest_${Date.now()}_${Math.random()
-      .toString(36)
-      .slice(2, 8)}`;
-
-    wave.attendees[guestKey] = entry;
-  }
+  const key = entry.userId || `guest_${makeId()}`;
+  wave.attendees[key] = entry;
 
   return true;
 }
 
-
 function formatEntry(entry, index) {
   let text =
-    `**${index + 1}.** ${entry.userId ? `<@${entry.userId}>` : `**${entry.ign}**`}` +
-    (entry.gameTag ? ` | Tag: ${entry.gameTag}` : "");
+    `**${index + 1}.** ` +
+    (entry.userId
+      ? `<@${entry.userId}>`
+      : `**${entry.ign || "Guest"}**`) +
+    (entry.gameTag || entry.tag
+      ? ` | Tag: ${entry.gameTag || entry.tag}`
+      : "");
 
   if (entry.friendIgn) {
-    text += `\n   ↳ Friend: **${entry.friendIgn}**` +
-      (entry.friendTag ? ` | Tag: ${entry.friendTag}` : "");
+    text += `\n   ↳ Friend: **${entry.friendIgn}**`;
+
+    if (entry.friendTag) {
+      text += ` | Tag: ${entry.friendTag}`;
+    }
   }
 
   return text;
 }
+
 // ==================================================
 // PUBLIC SIGNUP PANEL
 // ==================================================
@@ -322,40 +347,45 @@ function panelPayload(eventId, waveId) {
   const wave = getWave(eventId, waveId);
 
   const embed = new EmbedBuilder()
-    .setColor(wave.open && !event.ended ? 0x238636 : 0x8b2635)
-    .setTitle(`🎉 ${event.name.replace(/\s*[—–-]\s*[a-f0-9]{8}$/i, "").trim()}`)
+    .setColor(
+      wave.open && !event.ended ? 0x238636 : 0x8b2635
+    )
+    .setTitle(`🎉 ${event.name}`)
     .setDescription(
       `**Type:** ${event.type}\n` +
       (event.dateText ? `**When:** ${event.dateText}\n` : "") +
-      `**Host:** ${event.hostName || (event.hostId ? `<@${event.hostId}>` : "Not specified")}\n` +
-      `**Co-hosts:** ${event.cohost1Name || (event.cohost1Id ? `<@${event.cohost1Id}>` : "Not specified")} and ${event.cohost2Name || (event.cohost2Id ? `<@${event.cohost2Id}>` : "Not specified")}\n\n` +
+      `**Host:** ${event.hostName || "Not specified"}\n` +
+      `**Co-hosts:** ${event.cohost1Name || "Not specified"} and ${event.cohost2Name || "Not specified"}\n\n` +
       `**Attendee places:** ${totalSeats(wave)}/${CAPACITY}\n` +
-      `**Waiting list:** ${wave.waitlist.length}/${WAITLIST_CAPACITY}\n` +
+      `**Waiting list:** ${totalWaitingSeats(wave)}/${CAPACITY}\n` +
+      `**Waiting-list signups:** ${wave.waitlist.length}/${WAITLIST_CAPACITY}\n` +
       `**Signups:** ${wave.open && !event.ended ? "🟢 OPEN" : "🔴 CLOSED"}\n\n` +
       "**To sign up:** Press Sign Up and enter your IGN, Tag, " +
       "whether you are adding a friend, and your friend's IGN and Tag if applicable."
     )
     .setFooter({ text: "PPG Signup System 💜" });
 
-  const attendees = Object.values(wave.attendees);
+  const attendees = Object.values(wave.attendees || {});
 
   if (attendees.length) {
-    let text = "";
+    const lines = [];
+    let length = 0;
 
-    for (const [i, entry] of attendees.entries()) {
-      const line = formatEntry(entry, i);
+    for (const [index, entry] of attendees.entries()) {
+      const line = formatEntry(entry, index);
 
-      if ((text + "\n" + line).length > 1000) {
-        text += "\n…";
+      if (length + line.length + 1 > 1000) {
+        lines.push("…");
         break;
       }
 
-      text += (text ? "\n" : "") + line;
+      lines.push(line);
+      length += line.length + 1;
     }
 
     embed.addFields({
       name: "📋 Confirmed attendees",
-      value: text || "No attendees yet."
+      value: lines.join("\n")
     });
   }
 
@@ -397,16 +427,14 @@ async function refreshPanel(eventId, waveId) {
   }
 }
 
-async function postPanel(interaction, eventId, waveId) {
-  if (!interaction.channel?.send) {
+async function postPanel(channel, eventId, waveId) {
+  if (!channel?.send) {
     throw new Error("Use this action in a text channel.");
   }
 
-  const message = await interaction.channel.send(
-    panelPayload(eventId, waveId)
-  );
-
+  const message = await channel.send(panelPayload(eventId, waveId));
   const wave = getWave(eventId, waveId);
+
   wave.channelId = message.channelId;
   wave.messageId = message.id;
 
@@ -414,7 +442,7 @@ async function postPanel(interaction, eventId, waveId) {
 }
 
 // ==================================================
-// ADMIN MENU COMPONENTS
+// ADMIN MENUS
 // ==================================================
 
 function mainMenu() {
@@ -451,9 +479,8 @@ function mainMenu() {
   ];
 }
 
-function eventMenu(customId = "ppg:select-event", max = 25) {
-  const events = Object.values(db.events).slice(-max);
-
+function eventMenu(customId = "ppg:select-event") {
+  const events = Object.values(db.events).slice(-25);
   if (!events.length) return null;
 
   return new ActionRowBuilder().addComponents(
@@ -463,8 +490,7 @@ function eventMenu(customId = "ppg:select-event", max = 25) {
       .addOptions(
         events.map(event => ({
           label: short(event.name, 100),
-          description:
-            `${event.type}${event.ended ? " • Ended" : ""}`.slice(0, 100),
+          description: `${event.type}${event.ended ? " • Ended" : ""}`.slice(0, 100),
           value: event.id
         }))
       )
@@ -473,11 +499,9 @@ function eventMenu(customId = "ppg:select-event", max = 25) {
 
 function waveMenu(eventId) {
   const event = getEvent(eventId);
-
   if (!event) return null;
 
   const waves = Object.values(event.waves || {}).slice(0, 25);
-
   if (!waves.length) return null;
 
   return new ActionRowBuilder().addComponents(
@@ -500,7 +524,7 @@ function waveActionsMenu(eventId, waveId) {
     new StringSelectMenuBuilder()
       .setCustomId(`ppg:wave-action:${eventId}:${waveId}`)
       .setPlaceholder("Choose an action")
-            .addOptions(
+      .addOptions(
         { label: "Attendance summary", value: "attendance" },
         { label: "Confirmed attendee list", value: "list" },
         { label: "Waiting list", value: "waitlist" },
@@ -511,15 +535,10 @@ function waveActionsMenu(eventId, waveId) {
         { label: "Cancel entire event", value: "cancel-event" },
         { label: "Export CSV", value: "export" },
         { label: "Remove attendee", value: "remove" },
-        {
-          label: "Ping all confirmed attendees",
-          value: "ping",
-          description: "Mention everyone confirmed for this wave",
-          emoji: "📣"
-        },
+        { label: "Ping all confirmed attendees", value: "ping", emoji: "📣" },
         { label: "Promote from waiting list", value: "promote" }
       )
-    );
+  );
 }
 
 function confirmationMenu(customId) {
@@ -534,15 +553,16 @@ function confirmationMenu(customId) {
   );
 }
 
-
 function memberMenu(eventId, waveId, action) {
   const wave = getWave(eventId, waveId);
-
   if (!wave) return null;
 
   const entries = action === "promote"
     ? wave.waitlist
-    : Object.values(wave.attendees || {});
+    : Object.entries(wave.attendees || {}).map(([key, entry]) => ({
+        ...entry,
+        _storageKey: key
+      }));
 
   if (!entries.length) return null;
 
@@ -553,16 +573,15 @@ function memberMenu(eventId, waveId, action) {
       .addOptions(
         entries.slice(0, 25).map((entry, index) => ({
           label: short(entry.ign || entry.userId || "Guest", 100),
-          description:
-            action === "promote" ? "Waiting list" : "Confirmed attendee",
-          value: `entry_${index}`
+          description: action === "promote" ? "Waiting list" : "Confirmed attendee",
+          value: String(index)
         }))
       )
   );
 }
 
 // ==================================================
-// EVENT CREATION MODALS
+// MODALS
 // ==================================================
 
 function createEventModal() {
@@ -586,7 +605,7 @@ function createEventModal() {
           .setLabel(label)
           .setStyle(TextInputStyle.Short)
           .setMaxLength(max)
-          .setRequired(true)
+          .setRequired(id !== "cohost1" && id !== "cohost2")
           .setPlaceholder(placeholder)
       )
     );
@@ -600,15 +619,17 @@ function createWaveModal(eventId) {
     .setCustomId(`ppgform:create-wave:${eventId}`)
     .setTitle("Create Event Wave");
 
-  const name = new TextInputBuilder()
-    .setCustomId("name")
-    .setLabel("Wave name")
-    .setStyle(TextInputStyle.Short)
-    .setMaxLength(40)
-    .setRequired(true)
-    .setPlaceholder("Wave 2");
-
-  modal.addComponents(new ActionRowBuilder().addComponents(name));
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId("name")
+        .setLabel("Wave name")
+        .setStyle(TextInputStyle.Short)
+        .setMaxLength(40)
+        .setRequired(true)
+        .setPlaceholder("Wave 2")
+    )
+  );
 
   return modal;
 }
@@ -618,48 +639,26 @@ function entryModal(eventId, waveId) {
     .setCustomId(`ppgform:add:${eventId}:${waveId}`)
     .setTitle("Manually Add Attendee");
 
-  const ign = new TextInputBuilder()
-    .setCustomId("ign")
-    .setLabel("Member IGN")
-    .setStyle(TextInputStyle.Short)
-    .setRequired(true)
-    .setMaxLength(50);
+  const fields = [
+    ["ign", "Guest/member IGN", true, 50],
+    ["tag", "In-game Tag", true, 50],
+    ["friendign", "Friend IGN (optional)", false, 50],
+    ["friendtag", "Friend Tag (optional)", false, 50],
+    ["memberid", "Discord ID (optional)", false, 30]
+  ];
 
-  const tag = new TextInputBuilder()
-    .setCustomId("tag")
-    .setLabel("Member in-game Tag")
-    .setStyle(TextInputStyle.Short)
-    .setRequired(true)
-    .setMaxLength(50);
-
-  const friendIgn = new TextInputBuilder()
-    .setCustomId("friendign")
-    .setLabel("Friend IGN (optional)")
-    .setStyle(TextInputStyle.Short)
-    .setRequired(false)
-    .setMaxLength(50);
-
-  const friendTag = new TextInputBuilder()
-    .setCustomId("friendtag")
-    .setLabel("Friend Tag (optional)")
-    .setStyle(TextInputStyle.Short)
-    .setRequired(false)
-    .setMaxLength(50);
-
-  const memberId = new TextInputBuilder()
-    .setCustomId("memberid")
-    .setLabel("Discord ID (optional)")
-    .setStyle(TextInputStyle.Short)
-    .setRequired(false)
-    .setMaxLength(30);
-
-  modal.addComponents(
-    new ActionRowBuilder().addComponents(ign),
-    new ActionRowBuilder().addComponents(tag),
-    new ActionRowBuilder().addComponents(friendIgn),
-    new ActionRowBuilder().addComponents(friendTag),
-    new ActionRowBuilder().addComponents(memberId)
-  );
+  for (const [id, label, required, max] of fields) {
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId(id)
+          .setLabel(label)
+          .setStyle(TextInputStyle.Short)
+          .setRequired(required)
+          .setMaxLength(max)
+      )
+    );
+  }
 
   return modal;
 }
@@ -668,66 +667,47 @@ function entryModal(eventId, waveId) {
 // DELETE EVENTS
 // ==================================================
 
-
 async function deleteEvents(eventIds) {
   const deleted = [];
   const failed = [];
 
   for (const eventId of eventIds) {
     const event = getEvent(eventId);
-
     if (!event) continue;
 
     let allMessagesDeleted = true;
 
     for (const wave of Object.values(event.waves || {})) {
-      // Delete the signup panel.
-      if (wave.channelId && wave.messageId) {
-        try {
-          const channel = await client.channels.fetch(wave.channelId);
+      const messages = [];
 
-          if (!channel?.messages) {
-            allMessagesDeleted = false;
-          } else {
-            const message = await channel.messages.fetch(wave.messageId);
-            await message.delete();
-          }
-        } catch (error) {
-          if (error.code !== 10008) {
-            console.error(
-              `Could not delete signup panel for ${event.name}:`,
-              error.message
-            );
-            allMessagesDeleted = false;
-          }
-        }
+      if (wave.channelId && wave.messageId) {
+        messages.push({
+          channelId: wave.channelId,
+          messageId: wave.messageId
+        });
       }
 
-      // Delete tracked reminder/ping messages.
-      for (const ping of wave.pingMessages || []) {
-        try {
-          const channel = await client.channels.fetch(ping.channelId);
+      messages.push(...(wave.pingMessages || []));
 
+      for (const item of messages) {
+        try {
+          const channel = await client.channels.fetch(item.channelId);
           if (!channel?.messages) {
             allMessagesDeleted = false;
             continue;
           }
 
-          const message = await channel.messages.fetch(ping.messageId);
+          const message = await channel.messages.fetch(item.messageId);
           await message.delete();
         } catch (error) {
           if (error.code !== 10008) {
-            console.error(
-              `Could not delete ping message for ${event.name}:`,
-              error.message
-            );
             allMessagesDeleted = false;
+            console.error("Message deletion failed:", error.message);
           }
         }
       }
     }
 
-    // Keep the event and its records if any message could not be deleted.
     if (!allMessagesDeleted) {
       failed.push(event.name);
       continue;
@@ -738,7 +718,6 @@ async function deleteEvents(eventIds) {
   }
 
   saveData();
-
   return { deleted, failed };
 }
 
@@ -749,22 +728,20 @@ async function deleteEvents(eventIds) {
 client.once("ready", () => {
   console.log(`PPG Bot online as ${client.user.tag}`);
 });
+
 // ==================================================
-// INTERACTION HANDLER — COMMANDS AND BUTTONS
+// INTERACTIONS
 // ==================================================
 
 client.on("interactionCreate", async interaction => {
   try {
-    // ------------------------------------------
-    // /ppg COMMAND
-    // ------------------------------------------
-
+    // Slash command
     if (interaction.isChatInputCommand()) {
       if (interaction.commandName !== "ppg") return;
 
       if (!isPPGAdmin(interaction)) {
         return interaction.reply({
-          content: "⛔ Only members with the Admin role can use this command.",
+          content: "⛔ Only members with the PPG Admin role can use this command.",
           flags: MessageFlags.Ephemeral
         });
       }
@@ -776,17 +753,13 @@ client.on("interactionCreate", async interaction => {
       });
     }
 
-    // ------------------------------------------
-    // BUTTONS
-    // ------------------------------------------
-
+    // Buttons
     if (interaction.isButton()) {
       if (!interaction.customId.startsWith("ppg:")) return;
 
       const parts = interaction.customId.split(":");
       const action = parts[1];
 
-      // Admin panel buttons
       if (
         ["create-event", "create-wave", "manage", "delete-events", "stats"]
           .includes(action)
@@ -805,16 +778,9 @@ client.on("interactionCreate", async interaction => {
         if (action === "create-wave") {
           const row = eventMenu("ppg:create-wave-select");
 
-          if (!row) {
-            return interaction.reply({
-              content: "Create an event first.",
-              flags: MessageFlags.Ephemeral
-            });
-          }
-
           return interaction.reply({
-            content: "Select the event for the new wave.",
-            components: [row],
+            content: row ? "Select the event for the new wave." : "Create an event first.",
+            components: row ? [row] : [],
             flags: MessageFlags.Ephemeral
           });
         }
@@ -822,16 +788,9 @@ client.on("interactionCreate", async interaction => {
         if (action === "manage") {
           const row = eventMenu("ppg:manage-select");
 
-          if (!row) {
-            return interaction.reply({
-              content: "There are no events yet. Select Create Event first.",
-              flags: MessageFlags.Ephemeral
-            });
-          }
-
           return interaction.reply({
-            content: "Select an event to manage.",
-            components: [row],
+            content: row ? "Select an event to manage." : "There are no events yet.",
+            components: row ? [row] : [],
             flags: MessageFlags.Ephemeral
           });
         }
@@ -848,8 +807,7 @@ client.on("interactionCreate", async interaction => {
 
           const options = events.map(event => ({
             label: short(event.name, 100),
-            description:
-              `${event.type}${event.ended ? " • Ended" : ""}`.slice(0, 100),
+            description: `${event.type}${event.ended ? " • Ended" : ""}`.slice(0, 100),
             value: event.id
           }));
 
@@ -859,29 +817,25 @@ client.on("interactionCreate", async interaction => {
             value: "ALL"
           });
 
-          const row = new ActionRowBuilder().addComponents(
-            new StringSelectMenuBuilder()
-              .setCustomId("ppg:delete-select")
-              .setPlaceholder("Select events to delete")
-              .setMinValues(1)
-              .setMaxValues(options.length)
-              .addOptions(options)
-          );
-
           return interaction.reply({
-            content:
-              "🗑️ **Delete Events**\nSelect events to delete. " +
-              "You must confirm before permanent deletion.",
-            components: [row],
+            content: "Select event(s) to delete. You must confirm before deletion.",
+            components: [
+              new ActionRowBuilder().addComponents(
+                new StringSelectMenuBuilder()
+                  .setCustomId("ppg:delete-select")
+                  .setPlaceholder("Select events to delete")
+                  .setMinValues(1)
+                  .setMaxValues(options.length)
+                  .addOptions(options)
+              )
+            ],
             flags: MessageFlags.Ephemeral
           });
         }
 
         if (action === "stats") {
           const events = Object.values(db.events);
-          const waves = events.flatMap(
-            event => Object.values(event.waves || {})
-          );
+          const waves = events.flatMap(event => Object.values(event.waves || {}));
 
           return interaction.reply({
             content:
@@ -895,12 +849,7 @@ client.on("interactionCreate", async interaction => {
         }
       }
 
-      // ------------------------------------------
-      // PUBLIC SIGNUP / CANCELLATION BUTTONS
-      // ------------------------------------------
-
       const [, signupAction, eventId, waveId] = parts;
-
       if (!["signup", "cancel"].includes(signupAction)) return;
 
       const event = getEvent(eventId);
@@ -916,10 +865,8 @@ client.on("interactionCreate", async interaction => {
       if (signupAction === "cancel") {
         if (wave.attendees[interaction.user.id]) {
           delete wave.attendees[interaction.user.id];
-
           promoteFirstFit(wave);
           saveData();
-
           await refreshPanel(eventId, waveId);
 
           return interaction.reply({
@@ -934,10 +881,8 @@ client.on("interactionCreate", async interaction => {
 
         if (index >= 0) {
           wave.waitlist.splice(index, 1);
-
           promoteFirstFit(wave);
           saveData();
-
           await refreshPanel(eventId, waveId);
 
           return interaction.reply({
@@ -959,7 +904,6 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
-      // Prevent old events' Discord-ID hosts from taking attendee places.
       if (
         wave.attendees[interaction.user.id] ||
         wave.waitlist.some(entry => entry.userId === interaction.user.id)
@@ -998,10 +942,8 @@ client.on("interactionCreate", async interaction => {
 
       return interaction.showModal(modal);
     }
-        // ==========================================
-    // SELECT MENUS
-    // ==========================================
 
+    // Select menus
     if (interaction.isStringSelectMenu()) {
       const id = interaction.customId;
       const selected = interaction.values[0];
@@ -1013,11 +955,8 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
-      // Select an event for creating a wave
       if (id === "ppg:create-wave-select") {
-        const event = getEvent(selected);
-
-        if (!event) {
+        if (!getEvent(selected)) {
           return interaction.update({
             content: "Event not found.",
             components: []
@@ -1027,25 +966,18 @@ client.on("interactionCreate", async interaction => {
         return interaction.showModal(createWaveModal(selected));
       }
 
-      // Select an event to manage
       if (id === "ppg:manage-select") {
         const event = getEvent(selected);
         const row = waveMenu(selected);
 
-        if (!event || !row) {
-          return interaction.update({
-            content: "Event or waves not found.",
-            components: []
-          });
-        }
-
         return interaction.update({
-          content: `**${event.name}** — select a wave.`,
-          components: [row]
+          content: event && row
+            ? `**${event.name}** — select a wave.`
+            : "Event or waves not found.",
+          components: row ? [row] : []
         });
       }
 
-      // Select a wave
       if (id.startsWith("ppg:select-wave:")) {
         const eventId = id.split(":")[2];
         const waveId = selected;
@@ -1067,7 +999,6 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
-      // Select event(s) for deletion
       if (id === "ppg:delete-select") {
         let ids = interaction.values;
 
@@ -1085,63 +1016,54 @@ client.on("interactionCreate", async interaction => {
         }
 
         const key = makeId();
-
-        pending.set(key, {
+        db.pendingDeletes ||= {};
+        db.pendingDeletes[key] = {
           userId: interaction.user.id,
           eventIds: ids,
           createdAt: Date.now()
-        });
-
-        const names = ids
-          .map(eventId => `• ${getEvent(eventId).name}`)
-          .join("\n");
+        };
+        saveData();
 
         return interaction.update({
           content:
             `⚠️ **Confirm permanent deletion**\n\n` +
-            `${names.slice(0, 1100)}\n\n` +
-            `This deletes ${ids.length} event(s), their waves and signup records. This cannot be undone.`,
+            ids.map(eventId => `• ${getEvent(eventId).name}`).join("\n").slice(0, 1100) +
+            `\n\nThis deletes ${ids.length} event(s) and their signup records.`,
           components: [confirmationMenu(`ppg:delete-confirm:${key}`)]
         });
       }
 
-      // Confirm or cancel deletion
       if (id.startsWith("ppg:delete-confirm:")) {
         const key = id.split(":")[2];
-        const item = pending.get(key);
+        const item = db.pendingDeletes?.[key];
 
-        if (
-          !item ||
-          item.userId !== interaction.user.id ||
-          Date.now() - item.createdAt > CONFIRM_TIMEOUT
-        ) {
-          pending.delete(key);
-
+        if (!item || item.userId !== interaction.user.id) {
           return interaction.update({
             content: "Confirmation expired. Open Delete Events again.",
             components: []
           });
         }
 
-        pending.delete(key);
+        delete db.pendingDeletes[key];
 
         if (selected !== "yes") {
+          saveData();
           return interaction.update({
             content: "Deletion cancelled. No events were deleted.",
             components: []
           });
         }
 
-        const ids = item.eventIds.filter(eventId => getEvent(eventId));
-        const result = await deleteEvents(ids);
+        const result = await deleteEvents(
+          item.eventIds.filter(eventId => getEvent(eventId))
+        );
 
         let message =
-          `🗑️ Successfully deleted ${result.deleted.length} event(s) and their saved signup records.`;
+          `🗑️ Deleted ${result.deleted.length} event(s) and their signup records.`;
 
         if (result.failed.length) {
-          message +=
-            "\n\n⚠️ These events were kept because a signup panel could not be deleted:\n" +
-            result.failed.map(name => `• ${name}`).join("\n");
+          message += "\n\n⚠️ These events were kept because a message could not be deleted:\n" +
+            result.failed.join("\n");
         }
 
         return interaction.update({
@@ -1150,7 +1072,6 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
-      // Confirm event cancellation
       if (id.startsWith("ppg:cancel-confirm:")) {
         const eventId = id.split(":")[2];
         const event = getEvent(eventId);
@@ -1184,13 +1105,12 @@ client.on("interactionCreate", async interaction => {
         }
 
         return interaction.update({
-          content:
-            `🔴 **${event.name} cancelled.** All waves are closed and records are preserved.`,
+          content: `🔴 **${event.name} cancelled.** All waves are closed and records are preserved.`,
           components: []
         });
       }
 
-      // Wave action selection
+      // Wave actions
       if (id.startsWith("ppg:wave-action:")) {
         const parts = id.split(":");
         const eventId = parts[2];
@@ -1204,16 +1124,14 @@ client.on("interactionCreate", async interaction => {
             components: []
           });
         }
-        
+
         if (selected === "add") {
-        return interaction.showModal(entryModal(eventId, waveId));
+          return interaction.showModal(entryModal(eventId, waveId));
         }
 
         if (selected === "cancel-event") {
           return interaction.update({
-            content:
-              `⚠️ Cancel **${event.name}** and close every wave? ` +
-              "Attendee and waiting-list records will be kept.",
+            content: `⚠️ Cancel **${event.name}** and close every wave? Attendee records will be kept.`,
             components: [confirmationMenu(`ppg:cancel-confirm:${eventId}`)]
           });
         }
@@ -1228,7 +1146,6 @@ client.on("interactionCreate", async interaction => {
 
           wave.open = selected === "open";
           saveData();
-
           await refreshPanel(eventId, waveId);
 
           return interaction.update({
@@ -1238,13 +1155,7 @@ client.on("interactionCreate", async interaction => {
         }
 
         if (selected === "panel") {
-          const message = await interaction.channel.send(
-            panelPayload(eventId, waveId)
-          );
-
-          wave.channelId = message.channelId;
-          wave.messageId = message.id;
-          saveData();
+          await postPanel(interaction.channel, eventId, waveId);
 
           return interaction.update({
             content: "New signup panel posted.",
@@ -1252,48 +1163,35 @@ client.on("interactionCreate", async interaction => {
           });
         }
 
-        
         if (selected === "ping") {
-          const attendeeIds = Object.keys(wave.attendees || {});
+          const ids = Object.keys(wave.attendees || {})
+            .filter(key => /^\d{17,20}$/.test(key));
 
-          if (!attendeeIds.length) {
+          if (!ids.length) {
             return interaction.update({
-              content: "There are no confirmed attendees to ping.",
+              content: "There are no confirmed Discord members to ping.",
               components: [waveActionsMenu(eventId, waveId)]
             });
           }
 
-          const batches = [];
-
-          for (let i = 0; i < attendeeIds.length; i += 40) {
-            batches.push(attendeeIds.slice(i, i + 40));
-          }
-
           await interaction.update({
-            content: `📣 Sending a ping to ${attendeeIds.length} confirmed attendee(s)…`,
+            content: `📣 Sending a ping to ${ids.length} confirmed attendee(s)…`,
             components: [waveActionsMenu(eventId, waveId)]
           });
 
-          for (const batch of batches) {
-            const pingMessage = await interaction.channel.send({
-              content:
-                `📣 **PPG Event Reminder — ${event.name} | ${wave.name}**\n` +
+          for (let i = 0; i < ids.length; i += 40) {
+            const batch = ids.slice(i, i + 40);
+            const msg = await interaction.channel.send({
+              content: `📣 **PPG Event Reminder — ${event.name} | ${wave.name}**\n` +
                 batch.map(userId => `<@${userId}>`).join(" "),
-              allowedMentions: {
-                users: batch,
-                parse: []
-              }
+              allowedMentions: { users: batch, parse: [] }
             });
 
-            if (!Array.isArray(wave.pingMessages)) {
-              wave.pingMessages = [];
-            }
-
+            wave.pingMessages ||= [];
             wave.pingMessages.push({
-              channelId: pingMessage.channelId,
-              messageId: pingMessage.id
+              channelId: msg.channelId,
+              messageId: msg.id
             });
-
             saveData();
           }
 
@@ -1317,33 +1215,25 @@ client.on("interactionCreate", async interaction => {
             `"${String(value ?? "").replace(/"/g, '""')}"`;
 
           const rows = [[
-            "Discord User ID",
-            "IGN",
-            "In-Game Tag",
-            "Friend IGN",
-            "Friend Tag",
-            "Status",
-            "Signed Up At"
+            "Discord User ID", "IGN", "In-Game Tag",
+            "Friend IGN", "Friend Tag", "Status", "Signed Up At"
           ]];
 
-          for (const a of Object.values(wave.attendees)) {
+          for (const entry of Object.values(wave.attendees || {})) {
             rows.push([
-              a.userId, a.ign, a.gameTag, a.friendIgn,
-              a.friendTag, "Confirmed", a.signedUpAt
+              entry.userId, entry.ign, entry.gameTag || entry.tag,
+              entry.friendIgn, entry.friendTag, "Confirmed", entry.signedUpAt
             ]);
           }
 
-          for (const a of wave.waitlist) {
+          for (const entry of wave.waitlist || []) {
             rows.push([
-              a.userId, a.ign, a.gameTag, a.friendIgn,
-              a.friendTag, "Waiting list", a.signedUpAt
+              entry.userId, entry.ign, entry.gameTag || entry.tag,
+              entry.friendIgn, entry.friendTag, "Waiting list", entry.signedUpAt
             ]);
           }
 
-          const csv = rows
-            .map(row => row.map(cell).join(","))
-            .join("\n");
-
+          const csv = rows.map(row => row.map(cell).join(",")).join("\n");
           const file = new AttachmentBuilder(
             Buffer.from(csv, "utf8"),
             { name: `ppg-${eventId}-${waveId}.csv` }
@@ -1359,22 +1249,14 @@ client.on("interactionCreate", async interaction => {
         if (selected === "list" || selected === "waitlist") {
           const entries = selected === "waitlist"
             ? wave.waitlist
-            : Object.values(wave.attendees);
-
-          if (!entries.length) {
-            return interaction.update({
-              content: selected === "waitlist"
-                ? "Waiting list is empty."
-                : "No confirmed attendees.",
-              components: [waveActionsMenu(eventId, waveId)]
-            });
-          }
+            : Object.values(wave.attendees || {});
 
           return interaction.update({
-            content: entries
-              .map((entry, i) => formatEntry(entry, i))
-              .join("\n")
-              .slice(0, 1800),
+            content: entries.length
+              ? entries.map(formatEntry).join("\n").slice(0, 1800)
+              : selected === "waitlist"
+                ? "Waiting list is empty."
+                : "No confirmed attendees.",
             components: [waveActionsMenu(eventId, waveId)]
           });
         }
@@ -1390,108 +1272,95 @@ client.on("interactionCreate", async interaction => {
               components: [waveActionsMenu(eventId, waveId)]
             });
           }
-          if (selected === "remove" || selected === "promote") {
-  const row = memberMenu(eventId, waveId, selected);
 
           return interaction.update({
             content: selected === "promote"
-              ? "Select the waiting-list member to promote."
-              : "Select the confirmed attendee to remove.",
+              ? "Select the waiting-list entry to promote."
+              : "Select the attendee to remove.",
             components: [row]
           });
         }
       }
 
-      // Select attendee to remove or promote
-      
-    
-if (id.startsWith("ppg:member:")) {
-  const parts = id.split(":");
-  const action = parts[2];
-  const eventId = parts[3];
-  const waveId = parts[4];
-  const entryIndex = Number(selected.replace("entry_", ""));
-  const event = getEvent(eventId);
-  const wave = getWave(eventId, waveId);
+      // Remove attendee or promote waiting-list entry
+      if (id.startsWith("ppg:member:")) {
+        const parts = id.split(":");
+        const action = parts[2];
+        const eventId = parts[3];
+        const waveId = parts[4];
+        const index = Number(selected);
+        const event = getEvent(eventId);
+        const wave = getWave(eventId, waveId);
 
-  if (
-    !event ||
-    !wave ||
-    !Number.isInteger(entryIndex) ||
-    entryIndex < 0
-  ) {
-    return interaction.update({
-      content: "Event, wave or selection not found.",
-      components: []
-    });
-  }
-
-  if (action === "remove") {
-    const keys = Object.keys(wave.attendees || {});
-    const key = keys[entryIndex];
-
-    if (key === undefined) {
-      return interaction.update({
-        content: "Attendee not found. Please reopen the menu.",
-        components: [waveActionsMenu(eventId, waveId)]
-      });
-    }
-
-    delete wave.attendees[key];
-    promoteFirstFit(wave);
-    saveData();
-    await refreshPanel(eventId, waveId);
-
-    return interaction.update({
-      content: "Attendee removed from this wave.",
-      components: [waveActionsMenu(eventId, waveId)]
-    });
-  }
-
-  if (action === "promote") {
-    const entry = wave.waitlist[entryIndex];
-
-    if (!entry) {
-      return interaction.update({
-        content: "Waiting-list entry not found. Please reopen the menu.",
-        components: [waveActionsMenu(eventId, waveId)]
-      });
-    }
-
-    const promoted = promoteWaitingEntry(wave, entryIndex);
-
-    if (!promoted) {
-      return interaction.update({
-        content: "This signup could not be promoted.",
-        components: [waveActionsMenu(eventId, waveId)]
-      });
-    }
-
-    saveData();
-    await refreshPanel(eventId, waveId);
-
-    return interaction.update({
-      content: "Attendee promoted to confirmed attendees.",
-      components: [waveActionsMenu(eventId, waveId)]
-    });
-  }
-}
-    
-    // MODAL SUBMISSIONS
-    if (interaction.isModalSubmit()) {
-      const id = interaction.customId;
-
-      // CREATE EVENT
-      if (id === "ppgform:create-event") {
-        if (!isPPGAdmin(interaction)) {
-          return interaction.reply({
-            content: "You do not have permission to use this panel.",
-            ephemeral: true
+        if (
+          !event ||
+          !wave ||
+          !Number.isInteger(index) ||
+          index < 0
+        ) {
+          return interaction.update({
+            content: "Event, wave or selection not found.",
+            components: []
           });
         }
 
+        if (action === "remove") {
+          const keys = Object.keys(wave.attendees || {});
+          const key = keys[index];
+
+          if (key === undefined) {
+            return interaction.update({
+              content: "Attendee not found. Please reopen the menu.",
+              components: [waveActionsMenu(eventId, waveId)]
+            });
+          }
+
+          delete wave.attendees[key];
+          promoteFirstFit(wave);
+          saveData();
+          await refreshPanel(eventId, waveId);
+
+          return interaction.update({
+            content: "Attendee removed from this wave.",
+            components: [waveActionsMenu(eventId, waveId)]
+          });
+        }
+
+        if (action === "promote") {
+          if (!promoteWaitingEntry(wave, index)) {
+            return interaction.update({
+              content: "This entry could not be promoted because there may not be enough space.",
+              components: [waveActionsMenu(eventId, waveId)]
+            });
+          }
+
+          saveData();
+          await refreshPanel(eventId, waveId);
+
+          return interaction.update({
+            content: "Entry promoted to confirmed attendees.",
+            components: [waveActionsMenu(eventId, waveId)]
+          });
+        }
+      }
+    }
+
+    // Modal submissions
+    if (interaction.isModalSubmit()) {
+      const id = interaction.customId;
+
+      if (id.startsWith("ppgform:")) {
+        if (!isPPGAdmin(interaction) && !id.startsWith("ppgform:signup:")) {
+          return interaction.reply({
+            content: "You do not have permission to use this panel.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+      }
+
+      // Create event
+      if (id === "ppgform:create-event") {
         const name = interaction.fields.getTextInputValue("name").trim();
-        const cleanName = name.replace(/\s*[—–-]\s*[a-f0-9]{8}$/i, "").trim();
         const typeInput = interaction.fields.getTextInputValue("type").trim().toLowerCase();
         const hostName = interaction.fields.getTextInputValue("host").trim();
         const cohost1Name = interaction.fields.getTextInputValue("cohost1").trim();
@@ -1510,102 +1379,86 @@ if (id.startsWith("ppg:member:")) {
           "1000 gems": "1K Gems"
         };
 
-        const eventType = typeMap[typeInput];
+        const type = typeMap[typeInput];
 
-        if (!name || !eventType || !hostName) {
+        if (!name || !type || !hostName) {
           return interaction.reply({
-            content: "Please provide an event name, a valid event type (200, 400, 600 or 1K), and a host name.",
-            ephemeral: true
+            content: "Enter an event name, valid event type (200, 400, 600 or 1K), and host name.",
+            flags: MessageFlags.Ephemeral
           });
         }
 
-        const eventId = crypto.randomBytes(4).toString("hex");
-        const wave = createWave(eventId, "Wave 1", interaction.channelId);
+        const eventId = makeId();
+        const wave = createWave("Wave 1", interaction.channelId);
 
         db.events[eventId] = {
           id: eventId,
-          name: cleanName,
-          type: eventType,
+          name,
+          type,
           hostName,
           cohost1Name,
           cohost2Name,
           createdBy: interaction.user.id,
           createdAt: Date.now(),
           ended: false,
-          waves: {
-            [wave.id]: wave
-          }
+          waves: { [wave.id]: wave }
         };
 
         saveData();
 
         await interaction.reply({
-          content: `Created **${name}** (${eventType}). Posting the signup panel now.`,
-          ephemeral: true
+          content: `Created **${name}** (${type}). Posting the signup panel now.`,
+          flags: MessageFlags.Ephemeral
         });
 
-        await postPanel(interaction, eventId, wave.id);
+        await postPanel(interaction.channel, eventId, wave.id);
         return;
       }
 
-      // CREATE WAVE
-      if (id === "ppgform:create-wave") {
-        if (!isPPGAdmin(interaction)) {
-          return interaction.reply({
-            content: "You do not have permission to use this panel.",
-            ephemeral: true
-          });
-        }
-
-        const eventId = pending.get(interaction.user.id);
+      // Create wave
+      if (id.startsWith("ppgform:create-wave:")) {
+        const eventId = id.split(":")[2];
         const event = getEvent(eventId);
 
         if (!event || event.ended) {
           return interaction.reply({
-            content: "That event no longer exists or has been cancelled.",
-            ephemeral: true
+            content: "That event no longer exists or has ended.",
+            flags: MessageFlags.Ephemeral
           });
         }
 
-        const waveName = interaction.fields.getTextInputValue("name").trim();
+        const name = interaction.fields.getTextInputValue("name").trim();
 
-        if (!waveName) {
+        if (!name) {
           return interaction.reply({
             content: "Please enter a wave name.",
-            ephemeral: true
+            flags: MessageFlags.Ephemeral
           });
         }
 
-        const wave = createWave(eventId, waveName, interaction.channelId);
+        const wave = createWave(name, interaction.channelId);
         event.waves[wave.id] = wave;
         saveData();
 
         await interaction.reply({
-          content: `Created **${waveName}** for **${event.name}**.`,
-          ephemeral: true
+          content: `Created **${name}** for **${event.name}**.`,
+          flags: MessageFlags.Ephemeral
         });
 
-        await postPanel(interaction, eventId, wave.id);
+        await postPanel(interaction.channel, eventId, wave.id);
         return;
       }
 
-      // MANUALLY ADD AN ATTENDEE
+      // Manually add attendee or guest
       if (id.startsWith("ppgform:add:")) {
-        if (!isPPGAdmin(interaction)) {
-          return interaction.reply({
-            content: "You do not have permission to use this panel.",
-            ephemeral: true
-          });
-        }
-
         const [, , eventId, waveId] = id.split(":");
         const event = getEvent(eventId);
         const wave = getWave(eventId, waveId);
 
         if (!event || !wave || event.ended) {
           return interaction.reply({
-            content: "That event or wave could not be found.",
-            ephemeral: true
+            content: "That event or wave could not be found or has ended.",
+            flags: MessageFlags.Ephemeral
           });
         }
 
@@ -1614,66 +1467,68 @@ if (id.startsWith("ppg:member:")) {
         const tag = interaction.fields.getTextInputValue("tag").trim();
         const friendIgn = interaction.fields.getTextInputValue("friendign").trim();
         const friendTag = interaction.fields.getTextInputValue("friendtag").trim();
-        
 
         if (!ign || !tag) {
-  return interaction.reply({
-    content: "Enter the guest's IGN and in-game tag.",
-    ephemeral: true
-  });
-}
+          return interaction.reply({
+            content: "Enter the guest/member IGN and in-game tag.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
 
-if (memberId && !/^\d{17,20}$/.test(memberId)) {
-  return interaction.reply({
-    content: "If provided, the Discord user ID must be valid.",
-    ephemeral: true
-  });
-}
+        if (memberId && !/^\d{17,20}$/.test(memberId)) {
+          return interaction.reply({
+            content: "If provided, the Discord ID must contain 17–20 digits.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
 
         if (Boolean(friendIgn) !== Boolean(friendTag)) {
           return interaction.reply({
             content: "For a friend signup, provide both the friend's IGN and tag.",
-            ephemeral: true
+            flags: MessageFlags.Ephemeral
           });
         }
-const allEntries = [
-  ...Object.values(wave.attendees || {}),
-  ...wave.waitlist
-];
 
-      if (memberId && allEntries.some(entry => entry.userId === memberId)) {
-  return interaction.reply({
-    content: "That Discord user is already signed up for this wave.",
-    ephemeral: true
-  });
-}
+        const allEntries = [
+          ...Object.values(wave.attendees || {}),
+          ...(wave.waitlist || [])
+        ];
 
-if (allEntries.some(entry =>
-  !entry.userId &&
-  entry.ign?.toLowerCase() === ign.toLowerCase() &&
-  (entry.tag || entry.gameTag || "").toLowerCase() === tag.toLowerCase()
-)) {
-  return interaction.reply({
-    content: "That guest is already on this wave's list.",
-    ephemeral: true
-  });
-}
+        if (
+          memberId &&
+          allEntries.some(entry => entry.userId === memberId)
+        ) {
+          return interaction.reply({
+            content: "That Discord user is already signed up for this wave.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        if (allEntries.some(entry =>
+          entry.ign?.toLowerCase() === ign.toLowerCase() &&
+          (entry.gameTag || entry.tag || "").toLowerCase() === tag.toLowerCase()
+        )) {
+          return interaction.reply({
+            content: "That IGN and tag are already on this wave's list.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
 
         const result = enqueueOrConfirm(wave, {
-  userId: memberId || null,
-  ign,
-  tag,
-  friend: Boolean(friendIgn),
-  friendIgn,
-  friendTag,
-  signedUpAt: Date.now(),
-  manuallyAddedBy: interaction.user.id
-});
+          userId: memberId || null,
+          ign,
+          gameTag: tag,
+          tag,
+          friendIgn,
+          friendTag,
+          signedUpAt: new Date().toISOString(),
+          manuallyAddedBy: interaction.user.id
+        });
 
         if (!result.ok) {
           return interaction.reply({
-            content: result.message || "There is no available space or waiting-list slot.",
-            ephemeral: true
+            content: result.message,
+            flags: MessageFlags.Ephemeral
           });
         }
 
@@ -1682,11 +1537,11 @@ if (allEntries.some(entry =>
 
         return interaction.reply({
           content: `Added **${ign}**. Status: **${result.status}**.`,
-          ephemeral: true
+          flags: MessageFlags.Ephemeral
         });
       }
 
-      // PUBLIC SIGNUP FORM
+      // Public signup
       if (id.startsWith("ppgform:signup:")) {
         const [, , eventId, waveId] = id.split(":");
         const event = getEvent(eventId);
@@ -1695,7 +1550,7 @@ if (allEntries.some(entry =>
         if (!event || !wave || event.ended || !wave.open) {
           return interaction.reply({
             content: "Signups for this event wave are closed.",
-            ephemeral: true
+            flags: MessageFlags.Ephemeral
           });
         }
 
@@ -1708,14 +1563,14 @@ if (allEntries.some(entry =>
         if (!ign || !tag) {
           return interaction.reply({
             content: "Please enter both your in-game name and tag.",
-            ephemeral: true
+            flags: MessageFlags.Ephemeral
           });
         }
 
         if (!["yes", "no"].includes(friendAnswer)) {
           return interaction.reply({
             content: "For the friend question, enter YES or NO.",
-            ephemeral: true
+            flags: MessageFlags.Ephemeral
           });
         }
 
@@ -1723,44 +1578,44 @@ if (allEntries.some(entry =>
 
         if (hasFriend && (!friendIgn || !friendTag)) {
           return interaction.reply({
-            content: "You selected YES, so please provide your friend's IGN and tag.",
-            ephemeral: true
+            content: "You selected YES, so provide your friend's IGN and tag.",
+            flags: MessageFlags.Ephemeral
           });
         }
 
         if (!hasFriend && (friendIgn || friendTag)) {
           return interaction.reply({
             content: "You selected NO, so leave the friend's IGN and tag blank.",
-            ephemeral: true
+            flags: MessageFlags.Ephemeral
           });
         }
 
         const allEntries = [
-  ...Object.values(wave.attendees || {}),
-  ...(Array.isArray(wave.waitlist) ? wave.waitlist : [])
-];
+          ...Object.values(wave.attendees || {}),
+          ...(wave.waitlist || [])
+        ];
 
         if (allEntries.some(entry => entry.userId === interaction.user.id)) {
           return interaction.reply({
             content: "You are already signed up for this wave.",
-            ephemeral: true
+            flags: MessageFlags.Ephemeral
           });
         }
 
         const result = enqueueOrConfirm(wave, {
           userId: interaction.user.id,
           ign,
+          gameTag: tag,
           tag,
-          friend: hasFriend,
           friendIgn: hasFriend ? friendIgn : "",
           friendTag: hasFriend ? friendTag : "",
-          signedUpAt: Date.now()
+          signedUpAt: new Date().toISOString()
         });
 
         if (!result.ok) {
           return interaction.reply({
-            content: result.message || "There are no available places or waiting-list slots.",
-            ephemeral: true
+            content: result.message,
+            flags: MessageFlags.Ephemeral
           });
         }
 
@@ -1768,11 +1623,11 @@ if (allEntries.some(entry =>
         await refreshPanel(eventId, waveId);
 
         return interaction.reply({
-  content: result.status === "confirmed"
-    ? `You're confirmed, **${ign}**, for **${event.name} — ${wave.name}**!`
-    : `You're on the waiting list, **${ign}**, for **${event.name} — ${wave.name}**.`,
-  ephemeral: true
-});
+          content: result.status === "confirmed"
+            ? `You're confirmed, **${ign}**, for **${event.name} — ${wave.name}**!`
+            : `You're on the waiting list, **${ign}**, for **${event.name} — ${wave.name}**.`,
+          flags: MessageFlags.Ephemeral
+        });
       }
     }
   } catch (error) {
@@ -1781,18 +1636,17 @@ if (allEntries.some(entry =>
     if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
       await interaction.reply({
         content: "Something went wrong while processing that action. Please try again or contact an admin.",
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       }).catch(() => {});
     }
   }
 });
 
-// Register the single /ppg command and start the bot.
-async function start() {
-  if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
-    throw new Error("Missing DISCORD_TOKEN, CLIENT_ID or GUILD_ID environment variable.");
-  }
+// ==================================================
+// START BOT
+// ==================================================
 
+async function start() {
   const rest = new REST({ version: "10" }).setToken(TOKEN);
 
   await rest.put(
