@@ -619,18 +619,26 @@ client.once("ready", () => {
 // INTERACTIONS
 // ==================================================
 
+function isPPGAdmin(interaction) {
+  return interaction.member?.roles?.cache?.has(ADMIN_ROLE_ID) ?? false;
+}
+
 client.on("interactionCreate", async interaction => {
   try {
+    
     // Only slash command: /ppg
     if (interaction.isChatInputCommand()) {
       if (interaction.commandName !== "ppg") return;
 
-      if (!isAdmin(interaction)) {
-        return interaction.reply({
-          content: "Administrator permission is required.",
-          flags: MessageFlags.Ephemeral
-        });
-      }
+      // Only allow Admin role to open /ppg
+if (interaction.isChatInputCommand() && interaction.commandName === "ppg") {
+  if (!isPPGAdmin(interaction)) {
+    return interaction.reply({
+      content: "⛔ Only members with the Admin role can use this command.",
+      ephemeral: true
+    });
+  }
+}
 
       return interaction.reply({
         content: "**🏛️ PPG Management Panel**\nChoose an action below.",
