@@ -1589,13 +1589,21 @@ client.on("interactionCreate", async interaction => {
         const tag = interaction.fields.getTextInputValue("tag").trim();
         const friendIgn = interaction.fields.getTextInputValue("friendign").trim();
         const friendTag = interaction.fields.getTextInputValue("friendtag").trim();
+        
 
-        if (!/^\d{17,20}$/.test(memberId) || !ign || !tag) {
-          return interaction.reply({
-            content: "Enter a valid Discord user ID, IGN and in-game tag.",
-            ephemeral: true
-          });
-        }
+        if (!ign || !tag) {
+  return interaction.reply({
+    content: "Enter the guest's IGN and in-game tag.",
+    ephemeral: true
+  });
+}
+
+if (memberId && !/^\d{17,20}$/.test(memberId)) {
+  return interaction.reply({
+    content: "If provided, the Discord user ID must be valid.",
+    ephemeral: true
+  });
+}
 
         if (Boolean(friendIgn) !== Boolean(friendTag)) {
           return interaction.reply({
@@ -1608,23 +1616,34 @@ const allEntries = [
   ...wave.waitlist
 ];
 
-        if (allEntries.some(entry => entry.userId === memberId)) {
-          return interaction.reply({
-            content: "That Discord user is already signed up for this wave.",
-            ephemeral: true
-          });
-        }
+      if (memberId && allEntries.some(entry => entry.userId === memberId)) {
+  return interaction.reply({
+    content: "That Discord user is already signed up for this wave.",
+    ephemeral: true
+  });
+}
+
+if (allEntries.some(entry =>
+  !entry.userId &&
+  entry.ign?.toLowerCase() === ign.toLowerCase() &&
+  (entry.tag || entry.gameTag || "").toLowerCase() === tag.toLowerCase()
+)) {
+  return interaction.reply({
+    content: "That guest is already on this wave's list.",
+    ephemeral: true
+  });
+}
 
         const result = enqueueOrConfirm(wave, {
-          userId: memberId,
-          ign,
-          tag,
-          friend: Boolean(friendIgn),
-          friendIgn,
-          friendTag,
-          signedUpAt: Date.now(),
-          manuallyAddedBy: interaction.user.id
-        });
+  userId: memberId || null,
+  ign,
+  tag,
+  friend: Boolean(friendIgn),
+  friendIgn,
+  friendTag,
+  signedUpAt: Date.now(),
+  manuallyAddedBy: interaction.user.id
+});
 
         if (!result.ok) {
           return interaction.reply({
