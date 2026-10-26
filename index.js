@@ -489,10 +489,11 @@ function waveActionsMenu(eventId, waveId) {
     new StringSelectMenuBuilder()
       .setCustomId(`ppg:wave-action:${eventId}:${waveId}`)
       .setPlaceholder("Choose an action")
-      .addOptions(
+            .addOptions(
         { label: "Attendance summary", value: "attendance" },
         { label: "Confirmed attendee list", value: "list" },
         { label: "Waiting list", value: "waitlist" },
+        { label: "Add attendee", value: "add", emoji: "➕" },
         { label: "Open signups", value: "open" },
         { label: "Close signups", value: "close" },
         { label: "Repost signup panel", value: "panel" },
@@ -507,8 +508,6 @@ function waveActionsMenu(eventId, waveId) {
         },
         { label: "Promote from waiting list", value: "promote" }
       )
-  );
-}
 
 function confirmationMenu(customId) {
   return new ActionRowBuilder().addComponents(
@@ -1189,6 +1188,10 @@ client.on("interactionCreate", async interaction => {
             content: "Event or wave not found.",
             components: []
           });
+        }
+        
+        if (selected === "add") {
+        return interaction.showModal(entryModal(eventId, waveId));
         }
 
         if (selected === "cancel-event") {
