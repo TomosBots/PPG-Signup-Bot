@@ -34,6 +34,8 @@ const ADMIN_ROLE_ID = "1496238349722325103";
 const DATA_DIR = process.env.DATA_DIR || "/data";
 const DATA_FILE = path.join(DATA_DIR, "ppg-data.json");
 
+
+
 const CAPACITY = 22;
 const WAITLIST_CAPACITY = 5;
 const CONFIRM_TIMEOUT = 10 * 60 * 1000;
@@ -66,6 +68,18 @@ function readData() {
     throw error;
   }
 }
+
+
+function saveData() {
+  const temp = `${DATA_FILE}.tmp`;
+
+  fs.writeFileSync(temp, JSON.stringify(db, null, 2), {
+    mode: 0o600
+  });
+
+  fs.renameSync(temp, DATA_FILE);
+}
+
 
 let db = readData();
 
