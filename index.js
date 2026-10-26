@@ -1100,13 +1100,21 @@ if (interaction.isUserSelectMenu()) {
         }
 
         const ids = item.eventIds.filter(eventId => getEvent(eventId));
-        await deleteEvents(ids);
+const result = await deleteEvents(ids);
 
-        return interaction.update({
-          content: `🗑️ Deleted ${ids.length} event(s) and their saved signup records.`,
-          components: []
-        });
-      }
+let message =
+  `🗑️ Successfully deleted ${result.deleted.length} event(s) and their saved signup records.`;
+
+if (result.failed.length) {
+  message +=
+    "\n\n⚠️ These events were kept because a signup panel could not be deleted:\n" +
+    result.failed.map(name => `• ${name}`).join("\n");
+}
+
+return interaction.update({
+  content: message.slice(0, 1900),
+  components: []
+});
 
       // Confirm event cancellation
       if (id.startsWith("ppg:cancel-confirm:")) {
