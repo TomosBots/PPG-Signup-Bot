@@ -1461,6 +1461,7 @@ client.on("interactionCreate", async interaction => {
         }
 
         const name = interaction.fields.getTextInputValue("name").trim();
+        const cleanName = name.replace(/\s*[—–-]\s*[a-f0-9]{8}$/i, "").trim();
         const typeInput = interaction.fields.getTextInputValue("type").trim().toLowerCase();
         const hostName = interaction.fields.getTextInputValue("host").trim();
         const cohost1Name = interaction.fields.getTextInputValue("cohost1").trim();
@@ -1493,7 +1494,7 @@ client.on("interactionCreate", async interaction => {
 
         db.events[eventId] = {
           id: eventId,
-          name,
+          name: cleanName,
           type: eventType,
           hostName,
           cohost1Name,
