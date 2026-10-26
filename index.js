@@ -430,6 +430,8 @@ function waveActionsMenu(eventId, waveId) {
         { label: "Cancel entire event", value: "cancel-event" },
         { label: "Export CSV", value: "export" },
         { label: "Remove attendee", value: "remove" },
+        { label: "Ping all confirmed attendees", value: "ping", description: "Mention everyone confirmed for this wave", emoji: "📣"
+},
         { label: "Promote from waiting list", value: "promote" }
       )
   );
