@@ -312,7 +312,7 @@ function panelPayload(eventId, waveId) {
 
   const embed = new EmbedBuilder()
     .setColor(wave.open && !event.ended ? 0x238636 : 0x8b2635)
-    .setTitle(`🎉 ${event.name} — ${wave.name}`)
+    .setTitle(`🎉 ${event.name.replace(/\s*[—–-]\s*[a-f0-9]{8}$/i, "").trim()} — ${wave.name}`)
     .setDescription(
       `**Type:** ${event.type}\n` +
       (event.dateText ? `**When:** ${event.dateText}\n` : "") +
