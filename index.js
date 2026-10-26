@@ -2,15 +2,31 @@
 require("dotenv").config();
 
 const {
-  Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder,
-  PermissionFlagsBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder,
-  ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle,
-  MessageFlags, AttachmentBuilder, StringSelectMenuBuilder
+  Client,
+  GatewayIntentBits,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  PermissionFlagsBits,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  StringSelectMenuBuilder,
+  MessageFlags,
+  AttachmentBuilder
 } = require("discord.js");
 
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
+
+// ==================================================
+// CONFIGURATION
+// ==================================================
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
@@ -20,37 +36,41 @@ const DATA_FILE = path.join(DATA_DIR, "ppg-data.json");
 
 const CAPACITY = 22;
 const WAITLIST_CAPACITY = 5;
-const DELETE_CONFIRM_TTL_MS = 10 * 60 * 1000;
+const CONFIRM_TIMEOUT = 10 * 60 * 1000;
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
-  throw new Error("Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID environment variable.");
+  throw new Error("Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID.");
 }
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
-// ==============================================
-// DATABASE
-// ==============================================
+function short(value, max = 80) {
+  return String(value ?? "").trim().slice(0, max);
+}
+
+function makeId() {
+  return crypto.randomBytes(4).toString("hex");
+}
 
 function readData() {
   try {
-    const parsed = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
-    return parsed && typeof parsed === "object"
-      ? parsed
-      : { events: {} };
+    const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      return { events: {} };
+    }
+    return data;
   } catch (error) {
     if (error.code === "ENOENT") return { events: {} };
-    throw new Error(`Could not read ${DATA_FILE}: ${error.message}`);
+    throw error;
   }
 }
 
 let db = readData();
-
 if (!db.events || typeof db.events !== "object" || Array.isArray(db.events)) {
   db = { events: {} };
 }
 
-// Upgrade existing records without deleting signups.
+// Keep existing saved events and add fields introduced by newer versions.
 for (const event of Object.values(db.events)) {
   event.waves ||= {};
 
@@ -74,20 +94,17 @@ for (const event of Object.values(db.events)) {
 
 function saveData() {
   const temp = `${DATA_FILE}.tmp`;
-
-  fs.writeFileSync(
-    temp,
-    JSON.stringify(db, null, 2),
-    { mode: 0o600 }
-  );
-
+  fs.writeFileSync(temp, JSON.stringify(db, null, 2), { mode: 0o600 });
   fs.renameSync(temp, DATA_FILE);
 }
 
 saveData();
 
-const makeId = () => crypto.randomBytes(4).toString("hex");
-const short = (value, max = 80) => String(value ?? "").trim().slice(0, max);
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds]
+});
+
+const pending = new Map();
 
 const eventTypes = [
   { name: "200 Sponty", value: "200 Sponty" },
@@ -96,208 +113,15 @@ const eventTypes = [
   { name: "1K Gems", value: "1K Gems" }
 ];
 
-const adminOnly = command =>
-  command.setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
-
-// ==============================================
-// SLASH COMMANDS
-// ==============================================
-
+// Register only ONE slash command.
+// Registering this command list also removes the old guild commands.
 const commands = [
-  adminOnly(
-    new SlashCommandBuilder()
-      .setName("ppg-admin")
-      .setDescription("Open the PPG event and wave management panel.")
-  ),
-
-  adminOnly(
-    new SlashCommandBuilder()
-      .setName("ppg-create")
-      .setDescription("Create an event and its first wave.")
-      .addStringOption(o =>
-        o.setName("name").setDescription("Event name")
-          .setRequired(true).setMaxLength(80))
-      .addStringOption(o =>
-        o.setName("type").setDescription("Event type")
-          .setRequired(true).addChoices(...eventTypes))
-      .addUserOption(o =>
-        o.setName("host").setDescription("Event host").setRequired(true))
-      .addUserOption(o =>
-        o.setName("cohost1").setDescription("First co-host").setRequired(true))
-      .addUserOption(o =>
-        o.setName("cohost2").setDescription("Second co-host").setRequired(true))
-      .addStringOption(o =>
-        o.setName("date").setDescription("Optional date and time")
-          .setRequired(false).setMaxLength(80))
-  ),
-
-  adminOnly(
-    new SlashCommandBuilder()
-      .setName("ppg-wave")
-      .setDescription("Create another wave for an event.")
-      .addStringOption(o =>
-        o.setName("event_id").setDescription("Event ID").setRequired(true))
-      .addStringOption(o =>
-        o.setName("name").setDescription("Wave name")
-          .setRequired(true).setMaxLength(40))
-  ),
-
-  adminOnly(
-    new SlashCommandBuilder()
-      .setName("ppg-edit")
-      .setDescription("Edit an event's details.")
-      .addStringOption(o =>
-        o.setName("event_id").setDescription("Event ID").setRequired(true))
-      .addStringOption(o =>
-        o.setName("name").setDescription("New event name")
-          .setRequired(false).setMaxLength(80))
-      .addStringOption(o =>
-        o.setName("date").setDescription("New date/time; enter - to clear")
-          .setRequired(false).setMaxLength(80))
-      .addUserOption(o =>
-        o.setName("host").setDescription("New host").setRequired(false))
-      .addUserOption(o =>
-        o.setName("cohost1").setDescription("New first co-host").setRequired(false))
-      .addUserOption(o =>
-        o.setName("cohost2").setDescription("New second co-host").setRequired(false))
-  ),
-
-  ...["open", "close"].map(action =>
-    adminOnly(
-      new SlashCommandBuilder()
-        .setName(`ppg-${action}`)
-        .setDescription(`${action} signups for a wave.`)
-        .addStringOption(o =>
-          o.setName("event_id").setDescription("Event ID").setRequired(true))
-        .addStringOption(o =>
-          o.setName("wave_id").setDescription("Wave ID").setRequired(true))
-    )
-  ),
-
-  adminOnly(
-    new SlashCommandBuilder()
-      .setName("ppg-end")
-      .setDescription("Close all waves for an event.")
-      .addStringOption(o =>
-        o.setName("event_id").setDescription("Event ID").setRequired(true))
-  ),
-
-  adminOnly(
-    new SlashCommandBuilder()
-      .setName("ppg-delete")
-      .setDescription("Permanently delete an event and its data.")
-      .addStringOption(o =>
-        o.setName("event_id").setDescription("Event ID").setRequired(true))
-      .addStringOption(o =>
-        o.setName("confirm").setDescription("Select DELETE to confirm")
-          .setRequired(true)
-          .addChoices({ name: "DELETE", value: "DELETE" }))
-  ),
-
-  adminOnly(
-    new SlashCommandBuilder()
-      .setName("ppg-delete-events")
-      .setDescription("Select one, multiple, or all events to delete.")
-  ),
-
-  adminOnly(
-    new SlashCommandBuilder()
-      .setName("ppg-add")
-      .setDescription("Manually add an attendee.")
-      .addStringOption(o =>
-        o.setName("event_id").setDescription("Event ID").setRequired(true))
-      .addStringOption(o =>
-        o.setName("wave_id").setDescription("Wave ID").setRequired(true))
-      .addUserOption(o =>
-        o.setName("member").setDescription("Discord member").setRequired(true))
-      .addStringOption(o =>
-        o.setName("ign").setDescription("Member's in-game name")
-          .setRequired(true).setMaxLength(50))
-      .addStringOption(o =>
-        o.setName("gametag").setDescription("Member's in-game tag")
-          .setRequired(true).setMaxLength(50))
-      .addStringOption(o =>
-        o.setName("friend_ign").setDescription("Optional friend's IGN")
-          .setRequired(false).setMaxLength(50))
-      .addStringOption(o =>
-        o.setName("friend_tag").setDescription("Optional friend's in-game tag")
-          .setRequired(false).setMaxLength(50))
-  ),
-
-  ...["remove", "promote"].map(action =>
-    adminOnly(
-      new SlashCommandBuilder()
-        .setName(`ppg-${action}`)
-        .setDescription(`${action} an attendee.`)
-        .addStringOption(o =>
-          o.setName("event_id").setDescription("Event ID").setRequired(true))
-        .addStringOption(o =>
-          o.setName("wave_id").setDescription("Wave ID").setRequired(true))
-        .addUserOption(o =>
-          o.setName("member").setDescription("Discord member").setRequired(true))
-    )
-  ),
-
-  ...["list", "waitlist", "attendance", "export", "panel"].map(action =>
-    adminOnly(
-      new SlashCommandBuilder()
-        .setName(`ppg-${action}`)
-        .setDescription(`View or manage ${action}.`)
-        .addStringOption(o =>
-          o.setName("event_id").setDescription("Event ID").setRequired(true))
-        .addStringOption(o =>
-          o.setName("wave_id").setDescription("Wave ID").setRequired(true))
-    )
-  ),
-
-  adminOnly(
-    new SlashCommandBuilder()
-      .setName("ppg-events")
-      .setDescription("List all PPG events.")
-  ),
-
-  adminOnly(
-    new SlashCommandBuilder()
-      .setName("ppg-stats")
-      .setDescription("Show overall signup statistics.")
-  )
-].map(command => command.toJSON());
-
-// ==============================================
-// CLIENT AND HELPERS
-// ==============================================
-
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
-});
-
-const pendingDeletes = new Map();
-
-function getEvent(eventId) {
-  return db.events[eventId];
-}
-
-function getWave(eventId, waveId) {
-  return getEvent(eventId)?.waves?.[waveId];
-}
-
-function totalSeats(wave) {
-  return Object.values(wave.attendees).reduce(
-    (sum, a) => sum + 1 + (a.friendIgn ? 1 : 0),
-    0
-  );
-}
-
-function totalWaitingSeats(wave) {
-  return wave.waitlist.reduce(
-    (sum, a) => sum + 1 + (a.friendIgn ? 1 : 0),
-    0
-  );
-}
-
-function hostIds(event) {
-  return [event.hostId, event.cohost1Id, event.cohost2Id];
-}
+  new SlashCommandBuilder()
+    .setName("ppg")
+    .setDescription("Open the PPG event management panel.")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .toJSON()
+];
 
 function isAdmin(interaction) {
   return interaction.memberPermissions?.has(
@@ -305,8 +129,48 @@ function isAdmin(interaction) {
   );
 }
 
-function csvCell(value) {
-  return `"${String(value ?? "").replace(/"/g, '""')}"`;
+function getEvent(id) {
+  return db.events[id];
+}
+
+function getWave(eventId, waveId) {
+  return getEvent(eventId)?.waves?.[waveId];
+}
+
+function hostIds(event) {
+  return [event.hostId, event.cohost1Id, event.cohost2Id];
+}
+
+function totalSeats(wave) {
+  return Object.values(wave.attendees).reduce(
+    (sum, entry) => sum + 1 + (entry.friendIgn ? 1 : 0),
+    0
+  );
+}
+
+function totalWaitingSeats(wave) {
+  return wave.waitlist.reduce(
+    (sum, entry) => sum + 1 + (entry.friendIgn ? 1 : 0),
+    0
+  );
+}
+
+function createWave(name, channelId) {
+  return {
+    id: makeId(),
+    name,
+    open: true,
+    attendees: {},
+    waitlist: [],
+    channelId,
+    messageId: null,
+    createdAt: new Date().toISOString()
+  };
+}
+
+function parseUserId(value) {
+  const match = String(value || "").match(/\d{17,20}/);
+  return match ? match[0] : null;
 }
 
 function entryFor(userId, ign, gameTag, friendIgn, friendTag, addedBy) {
@@ -344,26 +208,13 @@ function enqueueOrConfirm(wave, entry) {
   return "full";
 }
 
-function promoteWaiting(wave, userId) {
-  const index = wave.waitlist.findIndex(a => a.userId === userId);
-  if (index < 0) return false;
-
-  const entry = wave.waitlist[index];
-  if (!seatsAvailable(wave, entry.friendIgn)) return false;
-
-  wave.waitlist.splice(index, 1);
-  wave.attendees[userId] = entry;
-  return true;
-}
-
 function promoteFirstFit(wave) {
   let changed = true;
 
   while (changed) {
     changed = false;
-
     const index = wave.waitlist.findIndex(
-      a => seatsAvailable(wave, a.friendIgn)
+      entry => seatsAvailable(wave, entry.friendIgn)
     );
 
     if (index >= 0) {
@@ -374,42 +225,38 @@ function promoteFirstFit(wave) {
   }
 }
 
-function getEventWaveOrReply(interaction, eventId, waveId) {
-  const event = getEvent(eventId);
-  const wave = getWave(eventId, waveId);
+function promoteWaiting(wave, userId) {
+  const index = wave.waitlist.findIndex(entry => entry.userId === userId);
+  if (index < 0) return false;
 
-  if (!event || !wave) {
-    interaction.reply({
-      content: "Event or wave not found. Use /ppg-admin or /ppg-events to find it.",
-      flags: MessageFlags.Ephemeral
-    });
-    return null;
-  }
+  const entry = wave.waitlist[index];
+  if (!seatsAvailable(wave, entry.friendIgn)) return false;
 
-  return { event, wave };
+  wave.waitlist.splice(index, 1);
+  wave.attendees[userId] = entry;
+  return true;
 }
 
-function formatEntry(a, index) {
-  let line =
-    `**${index + 1}.** <@${a.userId}> — **${a.ign}**` +
-    (a.gameTag ? ` | Tag: ${a.gameTag}` : "");
+function formatEntry(entry, index) {
+  let text =
+    `**${index + 1}.** <@${entry.userId}> — **${entry.ign}**` +
+    (entry.gameTag ? ` | Tag: ${entry.gameTag}` : "");
 
-  if (a.friendIgn) {
-    line += `\n   ↳ Friend: **${a.friendIgn}**` +
-      (a.friendTag ? ` | Tag: ${a.friendTag}` : "");
+  if (entry.friendIgn) {
+    text += `\n   ↳ Friend: **${entry.friendIgn}**` +
+      (entry.friendTag ? ` | Tag: ${entry.friendTag}` : "");
   }
 
-  return line;
+  return text;
 }
 
-// ==============================================
-// SIGNUP PANEL
-// ==============================================
+// ==================================================
+// PUBLIC SIGNUP PANEL
+// ==================================================
 
 function panelPayload(eventId, waveId) {
   const event = getEvent(eventId);
   const wave = getWave(eventId, waveId);
-  const attendees = Object.values(wave.attendees);
 
   const embed = new EmbedBuilder()
     .setColor(wave.open && !event.ended ? 0x238636 : 0x8b2635)
@@ -420,51 +267,52 @@ function panelPayload(eventId, waveId) {
       `**Host:** <@${event.hostId}>\n` +
       `**Co-hosts:** <@${event.cohost1Id}> and <@${event.cohost2Id}>\n\n` +
       `**Attendee places:** ${totalSeats(wave)}/${CAPACITY}\n` +
-      `**Waiting list:** ${wave.waitlist.length}/${WAITLIST_CAPACITY} signup(s)\n` +
+      `**Waiting list:** ${wave.waitlist.length}/${WAITLIST_CAPACITY}\n` +
       `**Signups:** ${wave.open && !event.ended ? "🟢 OPEN" : "🔴 CLOSED"}\n\n` +
-      "**How to sign up:** Press **Sign Up** and enter your IGN and in-game Tag. " +
-      "Choose YES or NO to add a friend. If YES, enter your friend's IGN and Tag. " +
-      "Each person uses one attendee place."
+      "**To sign up:** Press Sign Up and enter your IGN, Tag, " +
+      "whether you are adding a friend, and your friend's IGN and Tag if applicable."
     )
     .setFooter({ text: `Event ID: ${eventId} • Wave ID: ${waveId}` });
 
+  const attendees = Object.values(wave.attendees);
+
   if (attendees.length) {
-    let value = "";
+    let text = "";
 
-    for (const [i, attendee] of attendees.entries()) {
-      const line = formatEntry(attendee, i);
-
-      if ((value + "\n" + line).length > 1000) {
-        value += "\n…";
+    for (const [i, entry] of attendees.entries()) {
+      const line = formatEntry(entry, i);
+      if ((text + "\n" + line).length > 1000) {
+        text += "\n…";
         break;
       }
-
-      value += (value ? "\n" : "") + line;
+      text += (text ? "\n" : "") + line;
     }
 
     embed.addFields({
       name: "📋 Confirmed attendees",
-      value: value || "No confirmed attendees yet."
+      value: text || "No attendees yet."
     });
   }
 
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`ppg:signup:${eventId}:${waveId}`)
-      .setLabel("Sign Up")
-      .setEmoji("📝")
-      .setStyle(ButtonStyle.Success)
-      .setDisabled(!wave.open || event.ended),
-
-    new ButtonBuilder()
-      .setCustomId(`ppg:cancel:${eventId}:${waveId}`)
-      .setLabel("Cancel Signup")
-      .setEmoji("❌")
-      .setStyle(ButtonStyle.Danger)
-      .setDisabled(!wave.open || event.ended)
-  );
-
-  return { embeds: [embed], components: [row] };
+  return {
+    embeds: [embed],
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`ppg:signup:${eventId}:${waveId}`)
+          .setLabel("Sign Up")
+          .setEmoji("📝")
+          .setStyle(ButtonStyle.Success)
+          .setDisabled(!wave.open || event.ended),
+        new ButtonBuilder()
+          .setCustomId(`ppg:cancel:${eventId}:${waveId}`)
+          .setLabel("Cancel Signup")
+          .setEmoji("❌")
+          .setStyle(ButtonStyle.Danger)
+          .setDisabled(!wave.open || event.ended)
+      )
+    ]
+  };
 }
 
 async function refreshPanel(eventId, waveId) {
@@ -474,7 +322,6 @@ async function refreshPanel(eventId, waveId) {
   try {
     const channel = await client.channels.fetch(wave.channelId);
     if (!channel?.messages) return;
-
     const message = await channel.messages.fetch(wave.messageId);
     await message.edit(panelPayload(eventId, waveId));
   } catch (error) {
@@ -484,47 +331,61 @@ async function refreshPanel(eventId, waveId) {
 
 async function postPanel(interaction, eventId, waveId) {
   if (!interaction.channel?.send) {
-    throw new Error("Please use this command in a text channel.");
+    throw new Error("Use this action in a text channel.");
   }
 
   const message = await interaction.channel.send(panelPayload(eventId, waveId));
   const wave = getWave(eventId, waveId);
-
   wave.channelId = message.channelId;
   wave.messageId = message.id;
-
   saveData();
-  return message;
 }
 
-function validHostTeam(host, c1, c2) {
-  return new Set([host.id, c1.id, c2.id]).size === 3;
+// ==================================================
+// ADMIN MENU COMPONENTS
+// ==================================================
+
+function mainMenu() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("ppg:create-event")
+        .setLabel("Create Event")
+        .setEmoji("➕")
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId("ppg:create-wave")
+        .setLabel("Create Wave")
+        .setEmoji("🌊")
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId("ppg:manage")
+        .setLabel("Manage Events")
+        .setEmoji("⚙️")
+        .setStyle(ButtonStyle.Secondary)
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("ppg:delete-events")
+        .setLabel("Delete Events")
+        .setEmoji("🗑️")
+        .setStyle(ButtonStyle.Danger),
+      new ButtonBuilder()
+        .setCustomId("ppg:stats")
+        .setLabel("Statistics")
+        .setEmoji("📊")
+        .setStyle(ButtonStyle.Secondary)
+    )
+  ];
 }
 
-function createWave(name, channelId) {
-  return {
-    id: makeId(),
-    name,
-    open: true,
-    attendees: {},
-    waitlist: [],
-    channelId,
-    messageId: null,
-    createdAt: new Date().toISOString()
-  };
-}
-
-// ==============================================
-// ADMIN MENUS
-// ==============================================
-
-function adminEventMenu() {
-  const events = Object.values(db.events).slice(-25);
+function eventMenu(customId = "ppg:select-event", max = 25) {
+  const events = Object.values(db.events).slice(-max);
   if (!events.length) return null;
 
   return new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
-      .setCustomId("ppgadmin:event")
+      .setCustomId(customId)
       .setPlaceholder("Select an event")
       .addOptions(events.map(event => ({
         label: short(event.name, 100),
@@ -534,7 +395,7 @@ function adminEventMenu() {
   );
 }
 
-function adminWaveMenu(eventId) {
+function waveMenu(eventId) {
   const event = getEvent(eventId);
   if (!event) return null;
 
@@ -543,7 +404,7 @@ function adminWaveMenu(eventId) {
 
   return new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
-      .setCustomId(`ppgadmin:wave:${eventId}`)
+      .setCustomId(`ppg:select-wave:${eventId}`)
       .setPlaceholder("Select a wave")
       .addOptions(waves.map(wave => ({
         label: short(wave.name, 100),
@@ -553,74 +414,170 @@ function adminWaveMenu(eventId) {
   );
 }
 
-function adminActionMenu(eventId, waveId) {
+function waveActionsMenu(eventId, waveId) {
   return new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
-      .setCustomId(`ppgadmin:action:${eventId}:${waveId}`)
-      .setPlaceholder("Choose an admin action")
+      .setCustomId(`ppg:wave-action:${eventId}:${waveId}`)
+      .setPlaceholder("Choose an action")
       .addOptions(
-        { label: "View attendance", value: "attendance", description: "Show capacity and signup status" },
-        { label: "View attendee list", value: "list", description: "Show confirmed attendees" },
-        { label: "View waiting list", value: "waitlist", description: "Show waiting-list signups" },
-        { label: "Open signups", value: "open", description: "Allow members to sign up" },
-        { label: "Close signups", value: "close", description: "Stop new signups" },
-        { label: "Repost signup panel", value: "panel", description: "Post a fresh signup panel" },
-        { label: "Cancel Event", value: "cancel-event", description: "Close every wave and preserve records", emoji: "🔴" }
+        { label: "Attendance summary", value: "attendance" },
+        { label: "Confirmed attendee list", value: "list" },
+        { label: "Waiting list", value: "waitlist" },
+        { label: "Open signups", value: "open" },
+        { label: "Close signups", value: "close" },
+        { label: "Repost signup panel", value: "panel" },
+        { label: "Cancel entire event", value: "cancel-event" },
+        { label: "Export CSV", value: "export" },
+        { label: "Remove attendee", value: "remove" },
+        { label: "Promote from waiting list", value: "promote" }
       )
   );
 }
 
-function cancelEventMenu(eventId) {
+function confirmationMenu(customId) {
   return new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
-      .setCustomId(`ppgadmin:cancelconfirm:${eventId}`)
-      .setPlaceholder("Confirm event cancellation")
+      .setCustomId(customId)
+      .setPlaceholder("Confirm your choice")
       .addOptions(
-        { label: "Yes, cancel this event", value: "confirm", description: "Close every wave and preserve records", emoji: "🔴" },
-        { label: "No, go back", value: "back", description: "Return to wave selection", emoji: "↩️" }
+        { label: "YES — confirm", value: "yes", emoji: "✅" },
+        { label: "NO — go back", value: "no", emoji: "↩️" }
       )
   );
 }
 
-function deleteEventsMenu() {
-  const events = Object.values(db.events).slice(-24);
-  if (!events.length) return null;
+function memberMenu(eventId, waveId, action) {
+  const wave = getWave(eventId, waveId);
+  if (!wave) return null;
 
-  const options = events.map(event => ({
-    label: short(event.name, 100),
-    description: `${event.type} • ${Object.keys(event.waves || {}).length} wave(s)`.slice(0, 100),
-    value: event.id
-  }));
+  const entries = action === "promote"
+    ? wave.waitlist
+    : Object.values(wave.attendees);
 
-  options.push({
-    label: "ALL EVENTS",
-    description: "Delete every event and saved signup record",
-    value: "ALL"
-  });
+  if (!entries.length) return null;
 
   return new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
-      .setCustomId("ppgdelete:select")
-      .setPlaceholder("Select event(s) to delete")
-      .setMinValues(1)
-      .setMaxValues(options.length)
-      .addOptions(options)
+      .setCustomId(`ppg:member:${action}:${eventId}:${waveId}`)
+      .setPlaceholder("Select a member")
+      .addOptions(entries.slice(0, 25).map(entry => ({
+        label: short(entry.ign || entry.userId, 100),
+        description: action === "promote" ? "Waiting list" : "Confirmed attendee",
+        value: entry.userId
+      })))
   );
 }
 
-function deleteConfirmMenu(key) {
-  return new ActionRowBuilder().addComponents(
-    new StringSelectMenuBuilder()
-      .setCustomId(`ppgdelete:confirm:${key}`)
-      .setPlaceholder("Confirm deletion")
-      .addOptions(
-        { label: "YES — permanently delete", value: "confirm", description: "Remove selected events and saved records", emoji: "🗑️" },
-        { label: "NO — cancel", value: "cancel", description: "Keep all events and records", emoji: "↩️" }
-      )
+function createEventModal() {
+  const modal = new ModalBuilder()
+    .setCustomId("ppgform:create-event")
+    .setTitle("Create PPG Event");
+
+  const name = new TextInputBuilder()
+    .setCustomId("name")
+    .setLabel("Event name")
+    .setStyle(TextInputStyle.Short)
+    .setMaxLength(80)
+    .setRequired(true);
+
+  const type = new TextInputBuilder()
+    .setCustomId("type")
+    .setLabel("Type: 200 Sponty / 400 Gems / 600 Gems / 1K Gems")
+    .setStyle(TextInputStyle.Short)
+    .setMaxLength(20)
+    .setRequired(true)
+    .setPlaceholder("200 Sponty");
+
+  const host = new TextInputBuilder()
+    .setCustomId("host")
+    .setLabel("Host Discord ID or mention")
+    .setStyle(TextInputStyle.Short)
+    .setMaxLength(30)
+    .setRequired(true);
+
+  const cohost1 = new TextInputBuilder()
+    .setCustomId("cohost1")
+    .setLabel("First co-host Discord ID or mention")
+    .setStyle(TextInputStyle.Short)
+    .setMaxLength(30)
+    .setRequired(true);
+
+  const cohost2 = new TextInputBuilder()
+    .setCustomId("cohost2")
+    .setLabel("Second co-host Discord ID or mention")
+    .setStyle(TextInputStyle.Short)
+    .setMaxLength(30)
+    .setRequired(true);
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(name),
+    new ActionRowBuilder().addComponents(type),
+    new ActionRowBuilder().addComponents(host),
+    new ActionRowBuilder().addComponents(cohost1),
+    new ActionRowBuilder().addComponents(cohost2)
   );
+
+  return modal;
 }
 
-async function permanentlyDeleteEvents(eventIds) {
+function createWaveModal(eventId) {
+  const modal = new ModalBuilder()
+    .setCustomId(`ppgform:create-wave:${eventId}`)
+    .setTitle("Create Event Wave");
+
+  const name = new TextInputBuilder()
+    .setCustomId("name")
+    .setLabel("Wave name")
+    .setStyle(TextInputStyle.Short)
+    .setMaxLength(40)
+    .setRequired(true)
+    .setPlaceholder("Wave 2");
+
+  modal.addComponents(new ActionRowBuilder().addComponents(name));
+  return modal;
+}
+
+function entryModal(eventId, waveId) {
+  const modal = new ModalBuilder()
+    .setCustomId(`ppgform:add:${eventId}:${waveId}`)
+    .setTitle("Manually Add Attendee");
+
+  const ign = new TextInputBuilder()
+    .setCustomId("ign").setLabel("Member IGN")
+    .setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(50);
+
+  const tag = new TextInputBuilder()
+    .setCustomId("tag").setLabel("Member in-game Tag")
+    .setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(50);
+
+  const friendIgn = new TextInputBuilder()
+    .setCustomId("friendign").setLabel("Friend IGN (optional)")
+    .setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(50);
+
+  const friendTag = new TextInputBuilder()
+    .setCustomId("friendtag").setLabel("Friend Tag (optional)")
+    .setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(50);
+
+  const memberId = new TextInputBuilder()
+    .setCustomId("memberid").setLabel("Discord member ID")
+    .setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(30);
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(ign),
+    new ActionRowBuilder().addComponents(tag),
+    new ActionRowBuilder().addComponents(friendIgn),
+    new ActionRowBuilder().addComponents(friendTag),
+    new ActionRowBuilder().addComponents(memberId)
+  );
+
+  return modal;
+}
+
+// ==================================================
+// DELETE EVENTS
+// ==================================================
+
+async function deleteEvents(eventIds) {
   for (const eventId of eventIds) {
     const event = getEvent(eventId);
     if (!event) continue;
@@ -628,14 +585,12 @@ async function permanentlyDeleteEvents(eventIds) {
     for (const wave of Object.values(event.waves || {})) {
       try {
         if (!wave.channelId || !wave.messageId) continue;
-
         const channel = await client.channels.fetch(wave.channelId);
         if (!channel?.messages) continue;
-
         const message = await channel.messages.fetch(wave.messageId);
         await message.delete();
       } catch (error) {
-        console.error("Could not delete signup panel:", error.message);
+        console.error("Signup panel could not be deleted:", error.message);
       }
     }
 
@@ -645,26 +600,23 @@ async function permanentlyDeleteEvents(eventIds) {
   saveData();
 }
 
-// ==============================================
+// ==================================================
 // READY
-// ==============================================
+// ==================================================
 
 client.once("ready", () => {
-  console.log(`PPG Signup Bot online as ${client.user.tag}`);
+  console.log(`PPG Bot online as ${client.user.tag}`);
 });
 
-// ==============================================
-// INTERACTION HANDLER
-// ==============================================
+// ==================================================
+// INTERACTIONS
+// ==================================================
 
 client.on("interactionCreate", async interaction => {
   try {
-    // ------------------------------------------
-    // SLASH COMMANDS
-    // ------------------------------------------
-
+    // Only slash command: /ppg
     if (interaction.isChatInputCommand()) {
-      const cmd = interaction.commandName;
+      if (interaction.commandName !== "ppg") return;
 
       if (!isAdmin(interaction)) {
         return interaction.reply({
@@ -673,742 +625,124 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
-      if (cmd === "ppg-admin") {
-        const row = adminEventMenu();
+      return interaction.reply({
+        content: "**🏛️ PPG Management Panel**\nChoose an action below.",
+        components: mainMenu(),
+        flags: MessageFlags.Ephemeral
+      });
+    }
 
-        if (!row) {
+    // ==========================================
+    // BUTTONS
+    // ==========================================
+
+    if (interaction.isButton()) {
+      if (!interaction.customId.startsWith("ppg:")) return;
+
+      const parts = interaction.customId.split(":");
+      const action = parts[1];
+
+      // Admin buttons
+      if (["create-event", "create-wave", "manage", "delete-events", "stats"].includes(action)) {
+        if (!isAdmin(interaction)) {
           return interaction.reply({
-            content: "No events yet. Create one with /ppg-create.",
+            content: "Administrator permission is required.",
             flags: MessageFlags.Ephemeral
           });
         }
 
-        return interaction.reply({
-          content: "**🏛️ PPG Admin Panel**\nSelect an event below.",
-          components: [row],
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
-      if (cmd === "ppg-delete-events") {
-        const row = deleteEventsMenu();
-
-        if (!row) {
-          return interaction.reply({
-            content: "There are no events to delete.",
-            flags: MessageFlags.Ephemeral
-          });
+        if (action === "create-event") {
+          return interaction.showModal(createEventModal());
         }
 
-        return interaction.reply({
-          content: "🗑️ **Delete PPG Events**\n\nSelect one or more events below. Choose **ALL EVENTS** to delete everything. You'll be asked to confirm before deletion.",
-          components: [row],
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
-      if (cmd === "ppg-create") {
-        const host = interaction.options.getUser("host");
-        const c1 = interaction.options.getUser("cohost1");
-        const c2 = interaction.options.getUser("cohost2");
-
-        if (!validHostTeam(host, c1, c2)) {
-          return interaction.reply({
-            content: "Host and co-hosts must be three different people.",
-            flags: MessageFlags.Ephemeral
-          });
-        }
-
-        const eventId = makeId();
-        const wave = createWave("Wave 1", interaction.channelId);
-
-        db.events[eventId] = {
-          id: eventId,
-          name: short(interaction.options.getString("name"), 80),
-          type: interaction.options.getString("type"),
-          dateText: short(interaction.options.getString("date") || "", 80),
-          hostId: host.id,
-          cohost1Id: c1.id,
-          cohost2Id: c2.id,
-          createdBy: interaction.user.id,
-          createdAt: new Date().toISOString(),
-          ended: false,
-          waves: { [wave.id]: wave }
-        };
-
-        saveData();
-
-        await interaction.reply({
-          content: `Creating **${db.events[eventId].name}**…`,
-          flags: MessageFlags.Ephemeral
-        });
-
-        await postPanel(interaction, eventId, wave.id);
-
-        return interaction.followUp({
-          content: `Event created!\nEvent ID: \`${eventId}\`\nWave ID: \`${wave.id}\``,
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
-      if (cmd === "ppg-events") {
-        const list = Object.values(db.events);
-
-        if (!list.length) {
-          return interaction.reply({
-            content: "No events have been created yet.",
-            flags: MessageFlags.Ephemeral
-          });
-        }
-
-        return interaction.reply({
-          content: list.slice(-25).map(e =>
-            `**${e.name}** (${e.type}) — \`${e.id}\` — ${Object.keys(e.waves || {}).length} wave(s)${e.ended ? " — ENDED/CANCELLED" : ""}`
-          ).join("\n").slice(0, 1900),
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
-      if (cmd === "ppg-stats") {
-        const all = Object.values(db.events);
-        const waves = all.flatMap(e => Object.values(e.waves || {}));
-
-        return interaction.reply({
-          content:
-            `**PPG Statistics**\nEvents: ${all.length}\nWaves: ${waves.length}\n` +
-            `Confirmed places: ${waves.reduce((n, w) => n + totalSeats(w), 0)}\n` +
-            `Waiting-list places: ${waves.reduce((n, w) => n + totalWaitingSeats(w), 0)}`,
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
-      const eventId = interaction.options.getString("event_id");
-      const event = eventId ? getEvent(eventId) : null;
-
-      if (cmd === "ppg-wave") {
-        if (!event) {
-          return interaction.reply({
-            content: "Event not found. Use /ppg-events to find its ID.",
-            flags: MessageFlags.Ephemeral
-          });
-        }
-
-        const wave = createWave(
-          short(interaction.options.getString("name"), 40),
-          interaction.channelId
-        );
-
-        event.waves[wave.id] = wave;
-        saveData();
-
-        await interaction.reply({
-          content: `Creating **${wave.name}**…`,
-          flags: MessageFlags.Ephemeral
-        });
-
-        await postPanel(interaction, eventId, wave.id);
-
-        return interaction.followUp({
-          content: `Wave created!\nEvent ID: \`${eventId}\`\nWave ID: \`${wave.id}\``,
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
-      if (["ppg-edit", "ppg-end", "ppg-delete"].includes(cmd) && !event) {
-        return interaction.reply({
-          content: "Event not found. Use /ppg-events to find its ID.",
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
-      if (cmd === "ppg-edit") {
-        const name = interaction.options.getString("name");
-        const date = interaction.options.getString("date");
-        const host = interaction.options.getUser("host");
-        const c1 = interaction.options.getUser("cohost1");
-        const c2 = interaction.options.getUser("cohost2");
-
-        const h = host || { id: event.hostId };
-        const a = c1 || { id: event.cohost1Id };
-        const b = c2 || { id: event.cohost2Id };
-
-        if (new Set([h.id, a.id, b.id]).size !== 3) {
-          return interaction.reply({
-            content: "Host and co-hosts must be different people.",
-            flags: MessageFlags.Ephemeral
-          });
-        }
-
-        if (name !== null) event.name = short(name, 80);
-        if (date !== null) event.dateText = date === "-" ? "" : short(date, 80);
-
-        event.hostId = h.id;
-        event.cohost1Id = a.id;
-        event.cohost2Id = b.id;
-
-        saveData();
-
-        for (const wid of Object.keys(event.waves)) {
-          await refreshPanel(eventId, wid);
-        }
-
-        return interaction.reply({
-          content: `Updated **${event.name}**.`,
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
-      if (cmd === "ppg-end") {
-        event.ended = true;
-
-        for (const wave of Object.values(event.waves)) {
-          wave.open = false;
-        }
-
-        saveData();
-
-        for (const wid of Object.keys(event.waves)) {
-          await refreshPanel(eventId, wid);
-        }
-
-        return interaction.reply({
-          content: `Ended/cancelled **${event.name}**. Records were preserved.`,
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
-      if (cmd === "ppg-delete") {
-        await permanentlyDeleteEvents([eventId]);
-
-        return interaction.reply({
-          content: `Deleted event \`${eventId}\` and its saved data.`,
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
-      const waveId = interaction.options.getString("wave_id");
-      const found = getEventWaveOrReply(interaction, eventId, waveId);
-      if (!found) return;
-
-      const { event: selectedEvent, wave } = found;
-
-      if (cmd === "ppg-open" || cmd === "ppg-close") {
-        if (selectedEvent.ended && cmd === "ppg-open") {
-          return interaction.reply({
-            content: "This event has ended. Create a new event to reopen signups.",
-            flags: MessageFlags.Ephemeral
-          });
-        }
-
-        wave.open = cmd === "ppg-open";
-        saveData();
-        await refreshPanel(eventId, waveId);
-
-        return interaction.reply({
-          content: `Signups are now ${wave.open ? "open" : "closed"}.`,
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
-      if (cmd === "ppg-add") {
-        const member = interaction.options.getUser("member");
-        const ign = short(interaction.options.getString("ign"), 50);
-        const gameTag = short(interaction.options.getString("gametag"), 50);
-        const friendIgn = short(interaction.options.getString("friend_ign") || "", 50);
-        const friendTag = short(interaction.options.getString("friend_tag") || "", 50);
-
-        if (hostIds(selectedEvent).includes(member.id)) {
-          return interaction.reply({
-            content: "The host team does not use attendee places.",
-            flags: MessageFlags.Ephemeral
-          });
-        }
-
-        if (Boolean(friendIgn) !== Boolean(friendTag)) {
-          return interaction.reply({
-            content: "Provide BOTH friend_ign and friend_tag, or leave both blank.",
-            flags: MessageFlags.Ephemeral
-          });
-        }
-
-        if (wave.attendees[member.id] || wave.waitlist.some(a => a.userId === member.id)) {
-          return interaction.reply({
-            content: "That member is already registered.",
-            flags: MessageFlags.Ephemeral
-          });
-        }
-
-        const result = enqueueOrConfirm(
-          wave,
-          entryFor(member.id, ign, gameTag, friendIgn, friendTag, interaction.user.id)
-        );
-
-        if (result === "full") {
-          return interaction.reply({
-            content: "The attendee list and waiting list are full.",
-            flags: MessageFlags.Ephemeral
-          });
-        }
-
-        saveData();
-        await refreshPanel(eventId, waveId);
-
-        return interaction.reply({
-          content: result === "confirmed"
-            ? `Added ${member} to confirmed attendees.`
-            : `Added ${member} to the waiting list.`,
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
-      if (cmd === "ppg-remove") {
-        const member = interaction.options.getUser("member");
-
-        if (wave.attendees[member.id]) {
-          delete wave.attendees[member.id];
-          promoteFirstFit(wave);
-        } else {
-          const index = wave.waitlist.findIndex(a => a.userId === member.id);
-
-          if (index < 0) {
+        if (action === "create-wave") {
+          const row = eventMenu("ppg:create-wave-select");
+          if (!row) {
             return interaction.reply({
-              content: "That member is not on this wave's list.",
+              content: "Create an event first.",
               flags: MessageFlags.Ephemeral
             });
           }
 
-          wave.waitlist.splice(index, 1);
-        }
-
-        saveData();
-        await refreshPanel(eventId, waveId);
-
-        return interaction.reply({
-          content: `Removed ${member} from this wave.`,
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
-      if (cmd === "ppg-promote") {
-        const member = interaction.options.getUser("member");
-
-        if (!promoteWaiting(wave, member.id)) {
           return interaction.reply({
-            content: "That member is not waiting, or there isn't room for their whole signup.",
+            content: "Select the event for the new wave.",
+            components: [row],
             flags: MessageFlags.Ephemeral
           });
         }
 
-        saveData();
-        await refreshPanel(eventId, waveId);
+        if (action === "manage") {
+          const row = eventMenu("ppg:manage-select");
+          if (!row) {
+            return interaction.reply({
+              content: "There are no events yet. Select Create Event first.",
+              flags: MessageFlags.Ephemeral
+            });
+          }
 
-        return interaction.reply({
-          content: `Promoted ${member} to confirmed attendees.`,
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
-      if (cmd === "ppg-list" || cmd === "ppg-waitlist") {
-        const entries = cmd === "ppg-waitlist"
-          ? wave.waitlist
-          : Object.values(wave.attendees);
-
-        if (!entries.length) {
           return interaction.reply({
-            content: "No signups in this list.",
+            content: "Select an event to manage.",
+            components: [row],
             flags: MessageFlags.Ephemeral
           });
         }
 
-        return interaction.reply({
-          content: entries.map((a, i) => formatEntry(a, i)).join("\n").slice(0, 1900),
-          flags: MessageFlags.Ephemeral
-        });
-      }
+        if (action === "delete-events") {
+          const events = Object.values(db.events).slice(-24);
 
-      if (cmd === "ppg-attendance") {
-        return interaction.reply({
-          content:
-            `**${selectedEvent.name} — ${wave.name}**\n` +
-            `Confirmed places: ${totalSeats(wave)}/${CAPACITY}\n` +
-            `Waiting-list places: ${totalWaitingSeats(wave)}\n` +
-            `Waiting-list signups: ${wave.waitlist.length}/${WAITLIST_CAPACITY}\n` +
-            `Status: ${wave.open && !selectedEvent.ended ? "Open" : "Closed"}`,
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
-      if (cmd === "ppg-export") {
-        const rows = [[
-          "Discord User ID", "IGN", "In-Game Tag",
-          "Friend IGN", "Friend Tag", "Status", "Signed Up At"
-        ]];
-
-        for (const a of Object.values(wave.attendees)) {
-          rows.push([a.userId, a.ign, a.gameTag, a.friendIgn, a.friendTag, "Confirmed", a.signedUpAt]);
-        }
-
-        for (const a of wave.waitlist) {
-          rows.push([a.userId, a.ign, a.gameTag, a.friendIgn, a.friendTag, "Waiting list", a.signedUpAt]);
-        }
-
-        const csv = rows.map(row => row.map(csvCell).join(",")).join("\n");
-        const file = new AttachmentBuilder(
-          Buffer.from(csv, "utf8"),
-          { name: `ppg-${eventId}-${waveId}.csv` }
-        );
-
-        return interaction.reply({
-          content: "Attendance export:",
-          files: [file],
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
-      if (cmd === "ppg-panel") {
-        await postPanel(interaction, eventId, waveId);
-
-        return interaction.reply({
-          content: "Posted a fresh signup panel in this channel.",
-          flags: MessageFlags.Ephemeral
-        });
-      }
-    }
-
-    // ------------------------------------------
-    // DELETE EVENTS: SELECT EVENTS
-    // ------------------------------------------
-
-    if (
-      interaction.isStringSelectMenu() &&
-      interaction.customId === "ppgdelete:select"
-    ) {
-      if (!isAdmin(interaction)) {
-        return interaction.reply({
-          content: "Administrator permission is required.",
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
-      let selectedIds = interaction.values;
-
-      if (selectedIds.includes("ALL")) {
-        selectedIds = Object.keys(db.events);
-      }
-
-      const validIds = [...new Set(selectedIds)].filter(id => getEvent(id));
-
-      if (!validIds.length) {
-        return interaction.update({
-          content: "There are no matching events to delete.",
-          components: []
-        });
-      }
-
-      const key = makeId();
-
-      pendingDeletes.set(key, {
-        userId: interaction.user.id,
-        eventIds: validIds,
-        createdAt: Date.now()
-      });
-
-      const names = validIds.map(id => `• ${getEvent(id).name}`).join("\n");
-
-      return interaction.update({
-        content:
-          `⚠️ **Confirm Permanent Deletion**\n\n` +
-          `Selected: **${validIds.length} event(s)**\n` +
-          `${names.slice(0, 1100)}\n\n` +
-          "This permanently deletes these events, their waves, and saved signup records. This cannot be undone.",
-        components: [deleteConfirmMenu(key)]
-      });
-    }
-
-    // ------------------------------------------
-    // DELETE EVENTS: CONFIRM OR CANCEL
-    // ------------------------------------------
-
-    if (
-      interaction.isStringSelectMenu() &&
-      interaction.customId.startsWith("ppgdelete:confirm:")
-    ) {
-      if (!isAdmin(interaction)) {
-        return interaction.reply({
-          content: "Administrator permission is required.",
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
-      const key = interaction.customId.split(":")[2];
-      const pending = pendingDeletes.get(key);
-
-      if (
-        !pending ||
-        pending.userId !== interaction.user.id ||
-        Date.now() - pending.createdAt > DELETE_CONFIRM_TTL_MS
-      ) {
-        pendingDeletes.delete(key);
-
-        return interaction.update({
-          content: "This deletion confirmation expired. Run /ppg-delete-events again.",
-          components: []
-        });
-      }
-
-      pendingDeletes.delete(key);
-
-      if (interaction.values[0] !== "confirm") {
-        return interaction.update({
-          content: "Deletion cancelled. Your events and records are unchanged.",
-          components: []
-        });
-      }
-
-      const idsToDelete = pending.eventIds.filter(id => getEvent(id));
-
-      if (!idsToDelete.length) {
-        return interaction.update({
-          content: "The selected events no longer exist.",
-          components: []
-        });
-      }
-
-      await permanentlyDeleteEvents(idsToDelete);
-
-      return interaction.update({
-        content: `🗑️ **Deletion complete**\n\nDeleted **${idsToDelete.length} event(s)** and their saved signup records.`,
-        components: []
-      });
-    }
-
-    // ------------------------------------------
-    // ADMIN DROPDOWN SELECTIONS
-    // ------------------------------------------
-
-    if (
-      interaction.isStringSelectMenu() &&
-      interaction.customId.startsWith("ppgadmin:")
-    ) {
-      if (!isAdmin(interaction)) {
-        return interaction.reply({
-          content: "Administrator permission is required.",
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
-      const parts = interaction.customId.split(":");
-      const stage = parts[1];
-
-      if (stage === "event") {
-        const eventId = interaction.values[0];
-        const event = getEvent(eventId);
-        const row = adminWaveMenu(eventId);
-
-        if (!event || !row) {
-          return interaction.update({
-            content: "Event or waves not found.",
-            components: []
-          });
-        }
-
-        return interaction.update({
-          content: `**🏛️ PPG Admin Panel**\nEvent: **${event.name}**\nSelect a wave.`,
-          components: [row]
-        });
-      }
-
-      if (stage === "wave") {
-        const eventId = parts[2];
-        const waveId = interaction.values[0];
-        const event = getEvent(eventId);
-        const wave = getWave(eventId, waveId);
-
-        if (!event || !wave) {
-          return interaction.update({
-            content: "Event or wave not found.",
-            components: []
-          });
-        }
-
-        return interaction.update({
-          content:
-            `**🏛️ PPG Admin Panel**\nEvent: **${event.name}**\n` +
-            `Wave: **${wave.name}** (${totalSeats(wave)}/${CAPACITY} places)\n` +
-            "Choose an action.",
-          components: [adminActionMenu(eventId, waveId)]
-        });
-      }
-
-      if (stage === "action") {
-        const eventId = parts[2];
-        const waveId = parts[3];
-        const action = interaction.values[0];
-        const event = getEvent(eventId);
-        const wave = getWave(eventId, waveId);
-
-        if (!event || !wave) {
-          return interaction.update({
-            content: "Event or wave not found.",
-            components: []
-          });
-        }
-
-        if (action === "cancel-event") {
-          if (event.ended) {
-            return interaction.update({
-              content: `**${event.name}** has already been cancelled or ended.`,
-              components: []
+          if (!events.length) {
+            return interaction.reply({
+              content: "There are no events to delete.",
+              flags: MessageFlags.Ephemeral
             });
           }
 
-          return interaction.update({
+          const options = events.map(event => ({
+            label: short(event.name, 100),
+            description: `${event.type}${event.ended ? " • Ended" : ""}`.slice(0, 100),
+            value: event.id
+          }));
+
+          options.push({
+            label: "ALL EVENTS",
+            description: "Delete all events and signup records",
+            value: "ALL"
+          });
+
+          const row = new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder()
+              .setCustomId("ppg:delete-select")
+              .setPlaceholder("Select one or more events")
+              .setMinValues(1)
+              .setMaxValues(options.length)
+              .addOptions(options)
+          );
+
+          return interaction.reply({
+            content: "🗑️ **Delete Events**\nSelect one or more events, or choose ALL EVENTS. You must confirm before deletion.",
+            components: [row],
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        if (action === "stats") {
+          const events = Object.values(db.events);
+          const waves = events.flatMap(event => Object.values(event.waves || {}));
+
+          return interaction.reply({
             content:
-              `⚠️ **Cancel ${event.name}?**\n\n` +
-              "This closes signups for every wave. Attendee and waiting-list records will be preserved.",
-            components: [cancelEventMenu(eventId)]
+              `**PPG Statistics**\nEvents: ${events.length}\nWaves: ${waves.length}\n` +
+              `Confirmed places: ${waves.reduce((n, wave) => n + totalSeats(wave), 0)}\n` +
+              `Waiting-list places: ${waves.reduce((n, wave) => n + totalWaitingSeats(wave), 0)}`,
+            flags: MessageFlags.Ephemeral
           });
         }
-
-        if (action === "open" || action === "close") {
-          if (event.ended && action === "open") {
-            return interaction.update({
-              content: "This event has ended. Create a new event to reopen signups.",
-              components: [adminActionMenu(eventId, waveId)]
-            });
-          }
-
-          wave.open = action === "open";
-          saveData();
-          await refreshPanel(eventId, waveId);
-
-          return interaction.update({
-            content: `Signups are now **${wave.open ? "OPEN" : "CLOSED"}**.`,
-            components: [adminActionMenu(eventId, waveId)]
-          });
-        }
-
-        if (action === "panel") {
-          if (!interaction.channel?.send) {
-            return interaction.update({
-              content: "Please use the admin panel in a text channel.",
-              components: [adminActionMenu(eventId, waveId)]
-            });
-          }
-
-          const message = await interaction.channel.send(panelPayload(eventId, waveId));
-          wave.channelId = message.channelId;
-          wave.messageId = message.id;
-          saveData();
-
-          return interaction.update({
-            content: "A fresh signup panel has been posted.",
-            components: [adminActionMenu(eventId, waveId)]
-          });
-        }
-
-        if (action === "attendance") {
-          return interaction.update({
-            content:
-              `**${event.name} — ${wave.name}**\n` +
-              `Confirmed places: **${totalSeats(wave)}/${CAPACITY}**\n` +
-              `Waiting-list places: **${totalWaitingSeats(wave)}**\n` +
-              `Waiting-list signups: **${wave.waitlist.length}/${WAITLIST_CAPACITY}**\n` +
-              `Signups: **${wave.open && !event.ended ? "Open" : "Closed"}**\n` +
-              `Host: <@${event.hostId}>\n` +
-              `Co-hosts: <@${event.cohost1Id}> and <@${event.cohost2Id}>`,
-            components: [adminActionMenu(eventId, waveId)]
-          });
-        }
-
-        const entries = action === "waitlist"
-          ? wave.waitlist
-          : Object.values(wave.attendees);
-
-        if (!entries.length) {
-          return interaction.update({
-            content: action === "waitlist"
-              ? "The waiting list is empty."
-              : "No confirmed attendees yet.",
-            components: [adminActionMenu(eventId, waveId)]
-          });
-        }
-
-        return interaction.update({
-          content:
-            `**${action === "waitlist" ? "Waiting List" : "Confirmed Attendees"}**\n` +
-            entries.map((a, i) => formatEntry(a, i)).join("\n").slice(0, 1600),
-          components: [adminActionMenu(eventId, waveId)]
-        });
-      }
-    }
-
-    // ------------------------------------------
-    // CANCEL EVENT CONFIRMATION
-    // ------------------------------------------
-
-    if (
-      interaction.isStringSelectMenu() &&
-      interaction.customId.startsWith("ppgadmin:cancelconfirm:")
-    ) {
-      if (!isAdmin(interaction)) {
-        return interaction.reply({
-          content: "Administrator permission is required.",
-          flags: MessageFlags.Ephemeral
-        });
       }
 
-      const eventId = interaction.customId.split(":")[2];
-      const choice = interaction.values[0];
-      const event = getEvent(eventId);
+      // Signup / cancel buttons
+      const [, signupAction, eventId, waveId] = parts;
+      if (!["signup", "cancel"].includes(signupAction)) return;
 
-      if (!event) {
-        return interaction.update({
-          content: "Event not found.",
-          components: []
-        });
-      }
-
-      if (choice === "back") {
-        const row = adminWaveMenu(eventId);
-
-        return interaction.update({
-          content: `**${event.name}** — select a wave to continue.`,
-          components: row ? [row] : []
-        });
-      }
-
-      if (choice !== "confirm") return;
-
-      event.ended = true;
-
-      for (const wave of Object.values(event.waves || {})) {
-        wave.open = false;
-      }
-
-      saveData();
-
-      for (const waveId of Object.keys(event.waves || {})) {
-        await refreshPanel(eventId, waveId);
-      }
-
-      return interaction.update({
-        content:
-          `🔴 **${event.name} has been cancelled.**\n` +
-          "All wave signups are closed. Attendee and waiting-list records have been preserved.",
-        components: []
-      });
-    }
-
-    // ------------------------------------------
-    // SIGNUP AND CANCEL BUTTONS
-    // ------------------------------------------
-
-    if (interaction.isButton()) {
-      const parts = interaction.customId.split(":");
-      if (parts[0] !== "ppg") return;
-
-      const [, action, eventId, waveId] = parts;
       const event = getEvent(eventId);
       const wave = getWave(eventId, waveId);
 
@@ -1419,7 +753,7 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
-      if (action === "cancel") {
+      if (signupAction === "cancel") {
         if (wave.attendees[interaction.user.id]) {
           delete wave.attendees[interaction.user.id];
           promoteFirstFit(wave);
@@ -1432,7 +766,7 @@ client.on("interactionCreate", async interaction => {
           });
         }
 
-        const index = wave.waitlist.findIndex(a => a.userId === interaction.user.id);
+        const index = wave.waitlist.findIndex(entry => entry.userId === interaction.user.id);
 
         if (index >= 0) {
           wave.waitlist.splice(index, 1);
@@ -1451,100 +785,7 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
-      if (action === "signup") {
-        if (!wave.open || event.ended) {
-          return interaction.reply({
-            content: "Signups are closed.",
-            flags: MessageFlags.Ephemeral
-          });
-        }
-
-        if (hostIds(event).includes(interaction.user.id)) {
-          return interaction.reply({
-            content: "Host team members do not use attendee places.",
-            flags: MessageFlags.Ephemeral
-          });
-        }
-
-        if (
-          wave.attendees[interaction.user.id] ||
-          wave.waitlist.some(a => a.userId === interaction.user.id)
-        ) {
-          return interaction.reply({
-            content: "You're already registered for this wave.",
-            flags: MessageFlags.Ephemeral
-          });
-        }
-
-        const modal = new ModalBuilder()
-          .setCustomId(`ppgform:${eventId}:${waveId}`)
-          .setTitle("PPG Party Signup");
-
-        const ign = new TextInputBuilder()
-          .setCustomId("ign")
-          .setLabel("1. Your in-game name (IGN)")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true)
-          .setMaxLength(50)
-          .setPlaceholder("Enter your IGN");
-
-        const gameTag = new TextInputBuilder()
-          .setCustomId("gametag")
-          .setLabel("2. Your in-game Tag")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true)
-          .setMaxLength(50)
-          .setPlaceholder("Enter your tag");
-
-        const friendChoice = new TextInputBuilder()
-          .setCustomId("friend")
-          .setLabel("3. Add a friend? Enter YES or NO")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true)
-          .setMaxLength(3)
-          .setPlaceholder("YES or NO");
-
-        const friendIgn = new TextInputBuilder()
-          .setCustomId("friendign")
-          .setLabel("4. Friend's IGN (if YES)")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(false)
-          .setMaxLength(50)
-          .setPlaceholder("Leave blank if NO");
-
-        const friendTag = new TextInputBuilder()
-          .setCustomId("friendtag")
-          .setLabel("5. Friend's in-game Tag (if YES)")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(false)
-          .setMaxLength(50)
-          .setPlaceholder("Leave blank if NO");
-
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(ign),
-          new ActionRowBuilder().addComponents(gameTag),
-          new ActionRowBuilder().addComponents(friendChoice),
-          new ActionRowBuilder().addComponents(friendIgn),
-          new ActionRowBuilder().addComponents(friendTag)
-        );
-
-        return interaction.showModal(modal);
-      }
-    }
-
-    // ------------------------------------------
-    // SIGNUP FORM SUBMISSION
-    // ------------------------------------------
-
-    if (
-      interaction.isModalSubmit() &&
-      interaction.customId.startsWith("ppgform:")
-    ) {
-      const [, eventId, waveId] = interaction.customId.split(":");
-      const event = getEvent(eventId);
-      const wave = getWave(eventId, waveId);
-
-      if (!event || !wave || !wave.open || event.ended) {
+      if (!wave.open || event.ended) {
         return interaction.reply({
           content: "Signups are closed.",
           flags: MessageFlags.Ephemeral
@@ -1560,7 +801,7 @@ client.on("interactionCreate", async interaction => {
 
       if (
         wave.attendees[interaction.user.id] ||
-        wave.waitlist.some(a => a.userId === interaction.user.id)
+        wave.waitlist.some(entry => entry.userId === interaction.user.id)
       ) {
         return interaction.reply({
           content: "You're already registered for this wave.",
@@ -1568,77 +809,677 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
-      const ign = short(interaction.fields.getTextInputValue("ign"), 50);
-      const gameTag = short(interaction.fields.getTextInputValue("gametag"), 50);
-      const choice = short(interaction.fields.getTextInputValue("friend"), 3).toLowerCase();
-      const friendIgn = short(interaction.fields.getTextInputValue("friendign") || "", 50);
-      const friendTag = short(interaction.fields.getTextInputValue("friendtag") || "", 50);
+      const modal = new ModalBuilder()
+        .setCustomId(`ppgform:signup:${eventId}:${waveId}`)
+        .setTitle("PPG Party Signup");
 
-      const wantsFriend = ["yes", "y"].includes(choice);
-      const saysNoFriend = ["no", "n"].includes(choice);
+      const fields = [
+        ["ign", "1. Your in-game name (IGN)", true, "Enter your IGN"],
+        ["gametag", "2. Your in-game Tag", true, "Enter your tag"],
+        ["friend", "3. Add a friend? YES or NO", true, "YES or NO"],
+        ["friendign", "4. Friend's IGN (if YES)", false, "Leave blank if NO"],
+        ["friendtag", "5. Friend's Tag (if YES)", false, "Leave blank if NO"]
+      ];
 
-      if (!["yes", "y", "no", "n"].includes(choice)) {
-        return interaction.reply({
-          content: "For 'Add a friend?', enter YES or NO.",
+      modal.addComponents(...fields.map(([id, label, required, placeholder]) =>
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId(id)
+            .setLabel(label)
+            .setStyle(TextInputStyle.Short)
+            .setRequired(required)
+            .setMaxLength(id === "friend" ? 3 : 50)
+            .setPlaceholder(placeholder)
+        )
+      ));
+
+      return interaction.showModal(modal);
+    }
+
+    // ==========================================
+    // SELECT MENUS
+    // ==========================================
+
+    if (interaction.isStringSelectMenu()) {
+      const id = interaction.customId;
+      const selected = interaction.values[0];
+
+      if (id.startsWith("ppg:")) {
+        if (!isAdmin(interaction)) {
+          return interaction.reply({
+            content: "Administrator permission is required.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+      }
+
+      // Choose event for creating a wave
+      if (id === "ppg:create-wave-select") {
+        const event = getEvent(selected);
+        if (!event) {
+          return interaction.update({ content: "Event not found.", components: [] });
+        }
+        return interaction.showModal(createWaveModal(selected));
+      }
+
+      // Choose event to manage
+      if (id === "ppg:manage-select") {
+        const event = getEvent(selected);
+        const row = waveMenu(selected);
+
+        if (!event || !row) {
+          return interaction.update({ content: "Event or waves not found.", components: [] });
+        }
+
+        return interaction.update({
+          content: `**${event.name}** — select a wave.`,
+          components: [row]
+        });
+      }
+
+      if (id.startsWith("ppg:select-wave:")) {
+        const eventId = id.split(":")[2];
+        const waveId = selected;
+        const event = getEvent(eventId);
+        const wave = getWave(eventId, waveId);
+
+        if (!event || !wave) {
+          return interaction.update({ content: "Event or wave not found.", components: [] });
+        }
+
+        return interaction.update({
+          content:
+            `**${event.name} — ${wave.name}**\n` +
+            `${totalSeats(wave)}/${CAPACITY} places • ${wave.open ? "Open" : "Closed"}`,
+          components: [waveActionsMenu(eventId, waveId)]
+        });
+      }
+
+      // Delete selected events
+      if (id === "ppg:delete-select") {
+        let ids = interaction.values;
+
+        if (ids.includes("ALL")) {
+          ids = Object.keys(db.events);
+        }
+
+        ids = [...new Set(ids)].filter(eventId => getEvent(eventId));
+
+        if (!ids.length) {
+          return interaction.update({ content: "No events selected.", components: [] });
+        }
+
+        const key = makeId();
+        pending.set(key, {
+          userId: interaction.user.id,
+          eventIds: ids,
+          createdAt: Date.now()
+        });
+
+        const names = ids.map(eventId => `• ${getEvent(eventId).name}`).join("\n");
+
+        return interaction.update({
+          content:
+            `⚠️ **Confirm permanent deletion**\n\n${names.slice(0, 1100)}\n\n` +
+            `This deletes ${ids.length} event(s), all their waves, and signup records. This cannot be undone.`,
+          components: [confirmationMenu(`ppg:delete-confirm:${key}`)]
+        });
+      }
+
+      if (id.startsWith("ppg:delete-confirm:")) {
+        const key = id.split(":")[2];
+        const item = pending.get(key);
+
+        if (
+          !item ||
+          item.userId !== interaction.user.id ||
+          Date.now() - item.createdAt > CONFIRM_TIMEOUT
+        ) {
+          pending.delete(key);
+          return interaction.update({
+            content: "Confirmation expired. Open Delete Events again.",
+            components: []
+          });
+        }
+
+        pending.delete(key);
+
+        if (selected !== "yes") {
+          return interaction.update({
+            content: "Deletion cancelled. No events were deleted.",
+            components: []
+          });
+        }
+
+        const ids = item.eventIds.filter(eventId => getEvent(eventId));
+        await deleteEvents(ids);
+
+        return interaction.update({
+          content: `🗑️ Deleted ${ids.length} event(s) and their saved signup records.`,
+          components: []
+        });
+      }
+
+      // Confirm event cancellation
+      if (id.startsWith("ppg:cancel-confirm:")) {
+        const eventId = id.split(":")[2];
+        const event = getEvent(eventId);
+
+        if (!event) {
+          return interaction.update({ content: "Event not found.", components: [] });
+        }
+
+        if (selected !== "yes") {
+          const row = waveMenu(eventId);
+          return interaction.update({
+            content: `Cancellation cancelled for **${event.name}**.`,
+            components: row ? [row] : []
+          });
+        }
+
+        event.ended = true;
+        for (const wave of Object.values(event.waves || {})) wave.open = false;
+        saveData();
+
+        for (const waveId of Object.keys(event.waves || {})) {
+          await refreshPanel(eventId, waveId);
+        }
+
+        return interaction.update({
+          content: `🔴 **${event.name} cancelled.** All waves are closed and records are preserved.`,
+          components: []
+        });
+      }
+
+      // Wave action selection
+      if (id.startsWith("ppg:wave-action:")) {
+        const parts = id.split(":");
+        const eventId = parts[2];
+        const waveId = parts[3];
+        const event = getEvent(eventId);
+        const wave = getWave(eventId, waveId);
+
+        if (!event || !wave) {
+          return interaction.update({ content: "Event or wave not found.", components: [] });
+        }
+
+        if (selected === "cancel-event") {
+          return interaction.update({
+            content:
+              `⚠️ Cancel **${event.name}** and close every wave? ` +
+              "Attendee and waiting-list records will be kept.",
+            components: [confirmationMenu(`ppg:cancel-confirm:${eventId}`)]
+          });
+        }
+
+        if (selected === "open" || selected === "close") {
+          if (event.ended && selected === "open") {
+            return interaction.update({
+              content: "This event has ended. Create a new event to reopen signups.",
+              components: [waveActionsMenu(eventId, waveId)]
+            });
+          }
+
+          wave.open = selected === "open";
+          saveData();
+          await refreshPanel(eventId, waveId);
+
+          return interaction.update({
+            content: `Signups are now **${wave.open ? "OPEN" : "CLOSED"}**.`,
+            components: [waveActionsMenu(eventId, waveId)]
+          });
+        }
+
+        if (selected === "panel") {
+          const message = await interaction.channel.send(panelPayload(eventId, waveId));
+          wave.channelId = message.channelId;
+          wave.messageId = message.id;
+          saveData();
+
+          return interaction.update({
+            content: "New signup panel posted.",
+            components: [waveActionsMenu(eventId, waveId)]
+          });
+        }
+
+        if (selected === "attendance") {
+          return interaction.update({
+            content:
+              `**${event.name} — ${wave.name}**\n` +
+              `Confirmed places: ${totalSeats(wave)}/${CAPACITY}\n` +
+              `Waiting-list places: ${totalWaitingSeats(wave)}\n` +
+              `Waiting-list signups: ${wave.waitlist.length}/${WAITLIST_CAPACITY}\n` +
+              `Signups: ${wave.open && !event.ended ? "Open" : "Closed"}`,
+            components: [waveActionsMenu(eventId, waveId)]
+          });
+        }
+
+        if (selected === "export") {
+          const cell = value => `"${String(value ?? "").replace(/"/g, '""')}"`;
+          const rows = [[
+            "Discord User ID", "IGN", "In-Game Tag", "Friend IGN",
+            "Friend Tag", "Status", "Signed Up At"
+          ]];
+
+          for (const a of Object.values(wave.attendees)) {
+            rows.push([a.userId, a.ign, a.gameTag, a.friendIgn, a.friendTag, "Confirmed", a.signedUpAt]);
+          }
+
+          for (const a of wave.waitlist) {
+            rows.push([a.userId, a.ign, a.gameTag, a.friendIgn, a.friendTag, "Waiting list", a.signedUpAt]);
+          }
+
+          const csv = rows.map(row => row.map(cell).join(",")).join("\n");
+          const file = new AttachmentBuilder(
+            Buffer.from(csv, "utf8"),
+            { name: `ppg-${eventId}-${waveId}.csv` }
+          );
+
+          return interaction.reply({
+            content: `Export for ${event.name} — ${wave.name}`,
+            files: [file],
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        if (selected === "list" || selected === "waitlist") {
+          const entries = selected === "waitlist"
+            ? wave.waitlist
+            : Object.values(wave.attendees);
+
+          if (!entries.length) {
+            return interaction.update({
+              content: selected === "waitlist" ? "Waiting list is empty." : "No confirmed attendees.",
+              components: [waveActionsMenu(eventId, waveId)]
+            });
+          }
+
+          return interaction.update({
+            content: entries.map((entry, i) => formatEntry(entry, i)).join("\n").slice(0, 1800),
+            components: [waveActionsMenu(eventId, waveId)]
+          });
+        }
+
+        if (selected === "remove" || selected === "promote") {
+          const row = memberMenu(eventId, waveId, selected);
+
+          if (!row) {
+            return interaction.update({
+              content: selected === "promote" ? "Waiting list is empty." : "No confirmed attendees.",
+              components: [waveActionsMenu(eventId, waveId)]
+            });
+          }
+
+          return interaction.update({
+            content: selected === "promote"
+              ? "Select the waiting-list member to promote."
+              : "Select the confirmed attendee to remove.",
+            components: [row]
+          });
+        }
+      }
+
+      // Select attendee to remove or promote
+      if (id.startsWith("ppg:member:")) {
+        const parts = id.split(":");
+        const action = parts[2];
+        const eventId = parts[3];
+        const waveId = parts[4];
+        const userId = selected;
+        const event = getEvent(eventId);
+        const wave = getWave(eventId, waveId);
+
+        if (!event || !wave) {
+          return interaction.update({ content: "Event or wave not found.", components: [] });
+        }
+
+        if (action === "remove") {
+          if (wave.attendees[userId]) {
+            delete wave.attendees[userId];
+            promoteFirstFit(wave);
+          } else {
+            const index = wave.waitlist.findIndex(entry => entry.userId === userId);
+            if (index >= 0) wave.waitlist.splice(index, 1);
+            else {
+              return interaction.update({ content: "Member not found.", components: [] });
+            }
+          }
+
+          saveData();
+          await refreshPanel(eventId, waveId);
+
+          return interaction.update({
+            content: "Member removed from this wave.",
+            components: [waveActionsMenu(eventId, waveId)]
+          });
+        }
+
+        if (action === "promote") {
+          if (!promoteWaiting(wave, userId)) {
+            return interaction.update({
+              content: "Member could not be promoted; there may not be room for their entire signup.",
+              components: [waveActionsMenu(eventId, waveId)]
+            });
+          }
+
+          saveData();
+          await refreshPanel(eventId, waveId);
+
+          return interaction.update({
+            content: "Member promoted to confirmed attendees.",
+            components: [waveActionsMenu(eventId, waveId)]
+          });
+        }
+      }
+    }
+
+    // ==========================================
+    // MODAL SUBMISSIONS
+    // ==========================================
+
+    if (interaction.isModalSubmit()) {
+      const id = interaction.customId;
+
+      // Create event
+      if (id === "ppgform:create-event") {
+        if (!isAdmin(interaction)) {
+          return interaction.reply({
+            content: "Administrator permission is required.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        const name = short(interaction.fields.getTextInputValue("name"), 80);
+        const typeInput = short(interaction.fields.getTextInputValue("type"), 20).toLowerCase();
+
+        const typeMap = {
+          "200": "200 Sponty",
+          "200 sponty": "200 Sponty",
+          "400": "400 Gems",
+          "400 gems": "400 Gems",
+          "600": "600 Gems",
+          "600 gems": "600 Gems",
+          "1k": "1K Gems",
+          "1k gems": "1K Gems"
+        };
+
+        const type = typeMap[typeInput];
+        const hostId = parseUserId(interaction.fields.getTextInputValue("host"));
+        const cohost1Id = parseUserId(interaction.fields.getTextInputValue("cohost1"));
+        const cohost2Id = parseUserId(interaction.fields.getTextInputValue("cohost2"));
+
+        if (!type) {
+          return interaction.reply({
+            content: "Invalid event type. Use 200 Sponty, 400 Gems, 600 Gems, or 1K Gems.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        if (!hostId || !cohost1Id || !cohost2Id) {
+          return interaction.reply({
+            content: "One or more Discord IDs or mentions are invalid.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        if (new Set([hostId, cohost1Id, cohost2Id]).size !== 3) {
+          return interaction.reply({
+            content: "Host and co-hosts must be three different people.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        const eventId = makeId();
+        const wave = createWave("Wave 1", interaction.channelId);
+
+        db.events[eventId] = {
+          id: eventId,
+          name,
+          type,
+          dateText: "",
+          hostId,
+          cohost1Id,
+          cohost2Id,
+          createdBy: interaction.user.id,
+          createdAt: new Date().toISOString(),
+          ended: false,
+          waves: { [wave.id]: wave }
+        };
+
+        saveData();
+
+        await interaction.reply({
+          content: `Created **${name}**. Posting Wave 1 signup panel…`,
+          flags: MessageFlags.Ephemeral
+        });
+
+        await postPanel(interaction, eventId, wave.id);
+
+        return interaction.followUp({
+          content: `Event created!\nEvent ID: \`${eventId}\`\nWave 1 ID: \`${wave.id}\``,
           flags: MessageFlags.Ephemeral
         });
       }
 
-      if (!ign || !gameTag) {
-        return interaction.reply({
-          content: "Please enter both your IGN and your in-game Tag.",
+      // Create wave
+      if (id.startsWith("ppgform:create-wave:")) {
+        if (!isAdmin(interaction)) {
+          return interaction.reply({
+            content: "Administrator permission is required.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        const eventId = id.split(":")[2];
+        const event = getEvent(eventId);
+
+        if (!event) {
+          return interaction.reply({
+            content: "Event not found.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        if (event.ended) {
+          return interaction.reply({
+            content: "This event has ended. Create a new event for new signups.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        const wave = createWave(
+          short(interaction.fields.getTextInputValue("name"), 40),
+          interaction.channelId
+        );
+
+        event.waves[wave.id] = wave;
+        saveData();
+
+        await interaction.reply({
+          content: `Creating **${wave.name}**…`,
+          flags: MessageFlags.Ephemeral
+        });
+
+        await postPanel(interaction, eventId, wave.id);
+
+        return interaction.followUp({
+          content: `Wave created for **${event.name}**. Wave ID: \`${wave.id}\``,
           flags: MessageFlags.Ephemeral
         });
       }
 
-      if (wantsFriend && (!friendIgn || !friendTag)) {
+      // Manual add attendee
+      if (id.startsWith("ppgform:add:")) {
+        if (!isAdmin(interaction)) {
+          return interaction.reply({
+            content: "Administrator permission is required.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        const [, , , eventId, waveId] = id.split(":");
+        const event = getEvent(eventId);
+        const wave = getWave(eventId, waveId);
+
+        if (!event || !wave) {
+          return interaction.reply({
+            content: "Event or wave not found.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        const userId = parseUserId(interaction.fields.getTextInputValue("memberid"));
+        const ign = short(interaction.fields.getTextInputValue("ign"), 50);
+        const gameTag = short(interaction.fields.getTextInputValue("tag"), 50);
+        const friendIgn = short(interaction.fields.getTextInputValue("friendign"), 50);
+        const friendTag = short(interaction.fields.getTextInputValue("friendtag"), 50);
+
+        if (!userId || !ign || !gameTag) {
+          return interaction.reply({
+            content: "Enter a valid Discord member ID, IGN and in-game Tag.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        if (Boolean(friendIgn) !== Boolean(friendTag)) {
+          return interaction.reply({
+            content: "Enter both friend fields or leave both blank.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        if (hostIds(event).includes(userId)) {
+          return interaction.reply({
+            content: "The host team does not use attendee places.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        if (wave.attendees[userId] || wave.waitlist.some(entry => entry.userId === userId)) {
+          return interaction.reply({
+            content: "This member is already registered.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        const result = enqueueOrConfirm(
+          wave,
+          entryFor(userId, ign, gameTag, friendIgn, friendTag, interaction.user.id)
+        );
+
+        if (result === "full") {
+          return interaction.reply({
+            content: "The attendee list and waiting list are full.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        saveData();
+        await refreshPanel(eventId, waveId);
+
         return interaction.reply({
-          content: "You chose YES. Please enter BOTH your friend's IGN and Tag, then submit again.",
+          content: result === "confirmed" ? "Attendee added." : "Attendee added to waiting list.",
           flags: MessageFlags.Ephemeral
         });
       }
 
-      if (saysNoFriend && (friendIgn || friendTag)) {
+      // Public signup submission
+      if (id.startsWith("ppgform:signup:")) {
+        const [, , eventId, waveId] = id.split(":");
+        const event = getEvent(eventId);
+        const wave = getWave(eventId, waveId);
+
+        if (!event || !wave || !wave.open || event.ended) {
+          return interaction.reply({
+            content: "Signups are closed.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        if (hostIds(event).includes(interaction.user.id)) {
+          return interaction.reply({
+            content: "Host team members do not use attendee places.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        if (wave.attendees[interaction.user.id] || wave.waitlist.some(entry => entry.userId === interaction.user.id)) {
+          return interaction.reply({
+            content: "You're already registered for this wave.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        const ign = short(interaction.fields.getTextInputValue("ign"), 50);
+        const gameTag = short(interaction.fields.getTextInputValue("gametag"), 50);
+        const choice = short(interaction.fields.getTextInputValue("friend"), 3).toLowerCase();
+        const friendIgn = short(interaction.fields.getTextInputValue("friendign"), 50);
+        const friendTag = short(interaction.fields.getTextInputValue("friendtag"), 50);
+
+        const wantsFriend = ["yes", "y"].includes(choice);
+        const saysNoFriend = ["no", "n"].includes(choice);
+
+        if (!["yes", "y", "no", "n"].includes(choice)) {
+          return interaction.reply({
+            content: "For 'Add a friend?', enter YES or NO.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        if (!ign || !gameTag) {
+          return interaction.reply({
+            content: "Please enter both your IGN and your in-game Tag.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        if (wantsFriend && (!friendIgn || !friendTag)) {
+          return interaction.reply({
+            content: "You chose YES. Enter both your friend's IGN and Tag.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        if (saysNoFriend && (friendIgn || friendTag)) {
+          return interaction.reply({
+            content: "You chose NO. Leave both friend fields blank.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        const result = enqueueOrConfirm(
+          wave,
+          entryFor(
+            interaction.user.id,
+            ign,
+            gameTag,
+            wantsFriend ? friendIgn : "",
+            wantsFriend ? friendTag : "",
+            interaction.user.id
+          )
+        );
+
+        if (result === "full") {
+          return interaction.reply({
+            content: "The attendee list and waiting list are full.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        saveData();
+        await refreshPanel(eventId, waveId);
+
         return interaction.reply({
-          content: "You chose NO, so leave both friend fields blank and submit again.",
+          content:
+            `${result === "confirmed" ? "You're confirmed" : "You're on the waiting list"} ` +
+            `for **${event.name} — ${wave.name}**.\n` +
+            `**IGN:** ${ign}\n**Tag:** ${gameTag}` +
+            (wantsFriend
+              ? `\n**Friend:** ${friendIgn}\n**Friend's Tag:** ${friendTag}`
+              : "\n**Friend:** No"),
           flags: MessageFlags.Ephemeral
         });
       }
-
-      const entry = entryFor(
-        interaction.user.id,
-        ign,
-        gameTag,
-        wantsFriend ? friendIgn : "",
-        wantsFriend ? friendTag : "",
-        interaction.user.id
-      );
-
-      const result = enqueueOrConfirm(wave, entry);
-
-      if (result === "full") {
-        return interaction.reply({
-          content: "The attendee list and waiting list are full.",
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
-      saveData();
-      await refreshPanel(eventId, waveId);
-
-      const statusText = result === "confirmed"
-        ? "You're confirmed"
-        : "You've been added to the waiting list";
-
-      return interaction.reply({
-        content:
-          `${statusText} for **${event.name} — ${wave.name}**.\n` +
-          `**IGN:** ${ign}\n**Tag:** ${gameTag}` +
-          (wantsFriend
-            ? `\n**Friend:** ${friendIgn}\n**Friend's Tag:** ${friendTag}`
-            : "\n**Friend:** No"),
-        flags: MessageFlags.Ephemeral
-      });
     }
   } catch (error) {
     console.error("Interaction failed:", error);
@@ -1653,7 +1494,7 @@ client.on("interactionCreate", async interaction => {
 });
 
 // ==============================================
-// START BOT AND REGISTER COMMANDS
+// START BOT
 // ==============================================
 
 async function start() {
@@ -1664,7 +1505,7 @@ async function start() {
     { body: commands }
   );
 
-  console.log("PPG slash commands registered.");
+  console.log("Registered the single /ppg command.");
   await client.login(TOKEN);
 }
 
