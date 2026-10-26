@@ -73,36 +73,40 @@ if (!db.events || typeof db.events !== "object" || Array.isArray(db.events)) {
   db = { events: {} };
 }
 
-// Preserve saved events and add any missing fields.
+
+ // Preserve saved events and normalise wave data.
 for (const event of Object.values(db.events)) {
-  event.waves ||= {};
+  if (!event.waves || typeof event.waves !== "object" || Array.isArray(event.waves)) {
+    event.waves = {};
+  }
 
   for (const wave of Object.values(event.waves)) {
-    wave.attendees ||= {};
-    wave.waitlist ||= [];
+    if (!Array.isArray(wave.attendees)) {
+      wave.attendees = wave.attendees && typeof wave.attendees === "object"
+        ? Object.values(wave.attendees)
+        : [];
+    }
 
-    for (const entry of Object.values(wave.attendees)) {
-      entry.gameTag ||= "";
+    if (!Array.isArray(wave.waitlist)) {
+      wave.waitlist = wave.waitlist && typeof wave.waitlist === "object"
+        ? Object.values(wave.waitlist)
+        : [];
+    }
+
+    for (const entry of wave.attendees) {
+      entry.gameTag ||= entry.tag || "";
       entry.friendIgn ||= "";
       entry.friendTag ||= "";
     }
 
     for (const entry of wave.waitlist) {
-      entry.gameTag ||= "";
+      entry.gameTag ||= entry.tag || "";
       entry.friendIgn ||= "";
       entry.friendTag ||= "";
     }
+
+    wave.open ??= false;
   }
-}
-
-function saveData() {
-  const temp = `${DATA_FILE}.tmp`;
-
-  fs.writeFileSync(temp, JSON.stringify(db, null, 2), {
-    mode: 0o600
-  });
-
-  fs.renameSync(temp, DATA_FILE);
 }
 
 saveData();
