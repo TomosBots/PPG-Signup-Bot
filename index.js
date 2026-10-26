@@ -324,7 +324,7 @@ function panelPayload(eventId, waveId) {
       "**To sign up:** Press Sign Up and enter your IGN, Tag, " +
       "whether you are adding a friend, and your friend's IGN and Tag if applicable."
     )
-    .setFooter({ text: `Event ID: ${eventId} • Wave ID: ${waveId}` });
+    .setFooter({ text: "PPG Signup System 💜" });
 
   const attendees = Object.values(wave.attendees);
 
