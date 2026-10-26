@@ -1234,8 +1234,9 @@ client.on("interactionCreate", async interaction => {
           });
         }
 
+        
         if (selected === "ping") {
-          const attendeeIds = Object.keys(wave.attendees);
+          const attendeeIds = Object.keys(wave.attendees || {});
 
           if (!attendeeIds.length) {
             return interaction.update({
@@ -1256,26 +1257,26 @@ client.on("interactionCreate", async interaction => {
           });
 
           for (const batch of batches) {
-  const pingMessage = await interaction.channel.send({
-    content:
-      `📣 **PPG Event Reminder — ${event.name} | ${wave.name}**\n` +
-      batch.map(userId => `<@${userId}>`).join(" "),
-    allowedMentions: {
-      users: batch,
-      parse: []
-    }
-  });
+            const pingMessage = await interaction.channel.send({
+              content:
+                `📣 **PPG Event Reminder — ${event.name} | ${wave.name}**\n` +
+                batch.map(userId => `<@${userId}>`).join(" "),
+              allowedMentions: {
+                users: batch,
+                parse: []
+              }
+            });
 
-  if (!Array.isArray(wave.pingMessages)) {
-    wave.pingMessages = [];
-  }
+            if (!Array.isArray(wave.pingMessages)) {
+              wave.pingMessages = [];
+            }
 
-  wave.pingMessages.push({
-    channelId: pingMessage.channelId,
-    messageId: pingMessage.id
-  });
+            wave.pingMessages.push({
+              channelId: pingMessage.channelId,
+              messageId: pingMessage.id
+            });
 
-  saveData();
+            saveData();
           }
 
           return;
