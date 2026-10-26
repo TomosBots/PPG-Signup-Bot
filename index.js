@@ -654,6 +654,7 @@ function entryModal(eventId, waveId) {
 // DELETE EVENTS
 // ==================================================
 
+
 async function deleteEvents(eventIds) {
   const deleted = [];
   const failed = [];
@@ -663,36 +664,57 @@ async function deleteEvents(eventIds) {
 
     if (!event) continue;
 
-    let allPanelsDeleted = true;
+    let allMessagesDeleted = true;
 
-    // Delete reminder/ping messages for this wave.
-for (const ping of wave.pingMessages || []) {
-  try {
-    const channel = await client.channels.fetch(ping.channelId);
+    for (const wave of Object.values(event.waves || {})) {
+      // Delete the signup panel.
+      if (wave.channelId && wave.messageId) {
+        try {
+          const channel = await client.channels.fetch(wave.channelId);
 
-    if (!channel?.messages) {
-      allPanelsDeleted = false;
-      continue;
+          if (!channel?.messages) {
+            allMessagesDeleted = false;
+          } else {
+            const message = await channel.messages.fetch(wave.messageId);
+            await message.delete();
+          }
+        } catch (error) {
+          if (error.code !== 10008) {
+            console.error(
+              `Could not delete signup panel for ${event.name}:`,
+              error.message
+            );
+            allMessagesDeleted = false;
+          }
+        }
+      }
+
+      // Delete tracked reminder/ping messages.
+      for (const ping of wave.pingMessages || []) {
+        try {
+          const channel = await client.channels.fetch(ping.channelId);
+
+          if (!channel?.messages) {
+            allMessagesDeleted = false;
+            continue;
+          }
+
+          const message = await channel.messages.fetch(ping.messageId);
+          await message.delete();
+        } catch (error) {
+          if (error.code !== 10008) {
+            console.error(
+              `Could not delete ping message for ${event.name}:`,
+              error.message
+            );
+            allMessagesDeleted = false;
+          }
+        }
+      }
     }
 
-    const message = await channel.messages.fetch(ping.messageId);
-
-    await message.delete();
-  } catch (error) {
-    // Discord error 10008 means the message is already gone.
-    if (error.code !== 10008) {
-      console.error(
-        `Could not delete ping message for ${event.name}:`,
-        error.message
-      );
-
-      allPanelsDeleted = false;
-    }
-  }
-}
-
-    // Keep the event if a panel could not be deleted.
-    if (!allPanelsDeleted) {
+    // Keep the event and its records if any message could not be deleted.
+    if (!allMessagesDeleted) {
       failed.push(event.name);
       continue;
     }
