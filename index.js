@@ -273,6 +273,7 @@ function promoteFirstFit(wave) {
   }
 }
 
+
 function promoteWaiting(wave, userId) {
   const index = wave.waitlist.findIndex(
     entry => entry.userId === userId
@@ -285,10 +286,20 @@ function promoteWaiting(wave, userId) {
   if (!seatsAvailable(wave, entry.friendIgn)) return false;
 
   wave.waitlist.splice(index, 1);
-  wave.attendees[userId] = entry;
+
+  if (entry.userId) {
+    wave.attendees[entry.userId] = entry;
+  } else {
+    const guestKey = `guest_${Date.now()}_${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+
+    wave.attendees[guestKey] = entry;
+  }
 
   return true;
 }
+
 
 function formatEntry(entry, index) {
   let text =
@@ -523,6 +534,7 @@ function confirmationMenu(customId) {
   );
 }
 
+
 function memberMenu(eventId, waveId, action) {
   const wave = getWave(eventId, waveId);
 
@@ -530,7 +542,7 @@ function memberMenu(eventId, waveId, action) {
 
   const entries = action === "promote"
     ? wave.waitlist
-    : Object.values(wave.attendees);
+    : Object.values(wave.attendees || {});
 
   if (!entries.length) return null;
 
@@ -539,15 +551,16 @@ function memberMenu(eventId, waveId, action) {
       .setCustomId(`ppg:member:${action}:${eventId}:${waveId}`)
       .setPlaceholder("Select a member")
       .addOptions(
-        entries.slice(0, 25).map(entry => ({
-          label: short(entry.ign || entry.userId, 100),
+        entries.slice(0, 25).map((entry, index) => ({
+          label: short(entry.ign || entry.userId || "Guest", 100),
           description:
             action === "promote" ? "Waiting list" : "Confirmed attendee",
-          value: entry.userId
+          value: `entry_${index}`
         }))
       )
   );
 }
+
 // ==================================================
 // EVENT CREATION MODALS
 // ==================================================
@@ -1377,6 +1390,8 @@ client.on("interactionCreate", async interaction => {
               components: [waveActionsMenu(eventId, waveId)]
             });
           }
+          if (selected === "remove" || selected === "promote") {
+  const row = memberMenu(eventId, waveId, selected);
 
           return interaction.update({
             content: selected === "promote"
@@ -1388,69 +1403,79 @@ client.on("interactionCreate", async interaction => {
       }
 
       // Select attendee to remove or promote
-      if (id.startsWith("ppg:member:")) {
-        const parts = id.split(":");
-        const action = parts[2];
-        const eventId = parts[3];
-        const waveId = parts[4];
-        const userId = selected;
-        const event = getEvent(eventId);
-        const wave = getWave(eventId, waveId);
+      
+    
+if (id.startsWith("ppg:member:")) {
+  const parts = id.split(":");
+  const action = parts[2];
+  const eventId = parts[3];
+  const waveId = parts[4];
+  const entryIndex = Number(selected.replace("entry_", ""));
+  const event = getEvent(eventId);
+  const wave = getWave(eventId, waveId);
 
-        if (!event || !wave) {
-          return interaction.update({
-            content: "Event or wave not found.",
-            components: []
-          });
-        }
+  if (
+    !event ||
+    !wave ||
+    !Number.isInteger(entryIndex) ||
+    entryIndex < 0
+  ) {
+    return interaction.update({
+      content: "Event, wave or selection not found.",
+      components: []
+    });
+  }
 
-        if (action === "remove") {
-          if (wave.attendees[userId]) {
-            delete wave.attendees[userId];
-            promoteFirstFit(wave);
-          } else {
-            const index = wave.waitlist.findIndex(
-              entry => entry.userId === userId
-            );
+  if (action === "remove") {
+    const keys = Object.keys(wave.attendees || {});
+    const key = keys[entryIndex];
 
-            if (index >= 0) {
-              wave.waitlist.splice(index, 1);
-            } else {
-              return interaction.update({
-                content: "Member not found.",
-                components: []
-              });
-            }
-          }
-
-          saveData();
-          await refreshPanel(eventId, waveId);
-
-          return interaction.update({
-            content: "Member removed from this wave.",
-            components: [waveActionsMenu(eventId, waveId)]
-          });
-        }
-
-        if (action === "promote") {
-          if (!promoteWaiting(wave, userId)) {
-            return interaction.update({
-              content:
-                "Member could not be promoted; there may not be room for their entire signup.",
-              components: [waveActionsMenu(eventId, waveId)]
-            });
-          }
-
-          saveData();
-          await refreshPanel(eventId, waveId);
-
-          return interaction.update({
-            content: "Member promoted to confirmed attendees.",
-            components: [waveActionsMenu(eventId, waveId)]
-          });
-        }
-      }
+    if (key === undefined) {
+      return interaction.update({
+        content: "Attendee not found. Please reopen the menu.",
+        components: [waveActionsMenu(eventId, waveId)]
+      });
     }
+
+    delete wave.attendees[key];
+    promoteFirstFit(wave);
+    saveData();
+    await refreshPanel(eventId, waveId);
+
+    return interaction.update({
+      content: "Attendee removed from this wave.",
+      components: [waveActionsMenu(eventId, waveId)]
+    });
+  }
+
+  if (action === "promote") {
+    const entry = wave.waitlist[entryIndex];
+
+    if (!entry) {
+      return interaction.update({
+        content: "Waiting-list entry not found. Please reopen the menu.",
+        components: [waveActionsMenu(eventId, waveId)]
+      });
+    }
+
+    const promoted = promoteWaitingEntry(wave, entryIndex);
+
+    if (!promoted) {
+      return interaction.update({
+        content: "This signup could not be promoted.",
+        components: [waveActionsMenu(eventId, waveId)]
+      });
+    }
+
+    saveData();
+    await refreshPanel(eventId, waveId);
+
+    return interaction.update({
+      content: "Attendee promoted to confirmed attendees.",
+      components: [waveActionsMenu(eventId, waveId)]
+    });
+  }
+}
     
     // MODAL SUBMISSIONS
     if (interaction.isModalSubmit()) {
