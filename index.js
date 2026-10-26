@@ -481,12 +481,12 @@ function createEventModal() {
     .setRequired(true);
 
   const type = new TextInputBuilder()
-    .setCustomId("type")
-    .setLabel("Type: 200 Sponty / 400 Gems / 600 Gems / 1K Gems")
-    .setStyle(TextInputStyle.Short)
-    .setMaxLength(20)
-    .setRequired(true)
-    .setPlaceholder("200 Sponty");
+  .setCustomId("type")
+  .setLabel("Event type")
+  .setStyle(TextInputStyle.Short)
+  .setMaxLength(20)
+  .setRequired(true)
+  .setPlaceholder("200 Sponty, 400 Gems, 600 Gems or 1K Gems");
 
   const host = new TextInputBuilder()
     .setCustomId("host")
