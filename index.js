@@ -32,8 +32,10 @@ const crypto = require("node:crypto");
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
+const ADMIN_ROLE_ID = "1496238349722325103";
 const DATA_DIR = process.env.DATA_DIR || "/data";
 const DATA_FILE = path.join(DATA_DIR, "ppg-data.json");
+
 
 const CAPACITY = 22;
 const WAITLIST_CAPACITY = 5;
