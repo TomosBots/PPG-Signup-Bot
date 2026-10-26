@@ -557,26 +557,52 @@ function entryModal(eventId, waveId) {
 // ==================================================
 
 async function deleteEvents(eventIds) {
+  const deleted = [];
+  const failed = [];
+
   for (const eventId of eventIds) {
     const event = getEvent(eventId);
     if (!event) continue;
 
+    let allPanelsDeleted = true;
+
     for (const wave of Object.values(event.waves || {})) {
+      if (!wave.channelId || !wave.messageId) continue;
+
       try {
-        if (!wave.channelId || !wave.messageId) continue;
         const channel = await client.channels.fetch(wave.channelId);
-        if (!channel?.messages) continue;
+
+        if (!channel?.messages) {
+          allPanelsDeleted = false;
+          continue;
+        }
+
         const message = await channel.messages.fetch(wave.messageId);
         await message.delete();
       } catch (error) {
-        console.error("Signup panel could not be deleted:", error.message);
+        // Discord error 10008 means the message is already gone.
+        if (error.code !== 10008) {
+          console.error(
+            `Could not delete panel for ${event.name}:`,
+            error.message
+          );
+          allPanelsDeleted = false;
+        }
       }
     }
 
+    if (!allPanelsDeleted) {
+      failed.push(event.name);
+      continue;
+    }
+
     delete db.events[eventId];
+    deleted.push(event.name);
   }
 
   saveData();
+
+  return { deleted, failed };
 }
 
 // ==================================================
