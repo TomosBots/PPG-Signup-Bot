@@ -7,6 +7,7 @@ const {
   REST,
   Routes,
   SlashCommandBuilder,
+  UserSelectMenuBuilder,
   PermissionFlagsBits,
   EmbedBuilder,
   ActionRowBuilder,
