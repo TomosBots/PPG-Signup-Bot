@@ -508,6 +508,8 @@ function waveActionsMenu(eventId, waveId) {
         },
         { label: "Promote from waiting list", value: "promote" }
       )
+    );
+}
 
 function confirmationMenu(customId) {
   return new ActionRowBuilder().addComponents(
