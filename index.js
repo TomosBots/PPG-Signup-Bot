@@ -317,13 +317,15 @@ function promoteWaitingEntry(wave, index) {
   return true;
 }
 
-function formatEntry(entry, index) {
+
+function formatEntry(entry, index = 0) {
+  const ign = entry.ign
+    ? `**${entry.ign}**`
+    : "**IGN not provided**";
+
   let text =
-    `**${index + 1}.** ` +
-    (entry.userId
-      ? `<@${entry.userId}>`
-      : `**${entry.ign || "Guest"}**`) +
-    (entry.gameTag || entry.tag
+    `**${index + 1}.** ${ign}` +
+    ((entry.gameTag || entry.tag)
       ? ` | Tag: ${entry.gameTag || entry.tag}`
       : "");
 
